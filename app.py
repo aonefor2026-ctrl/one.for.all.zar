@@ -6298,6 +6298,20 @@ def poll_gold_bot():
         time.sleep(5)
 
 
+def _delete_webhook_if_any(token):
+    if not token:
+        return
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{token}/deleteWebhook",
+                          params={"drop_pending_updates": "false"}, timeout=15)
+        print(f"[STARTUP] deleteWebhook({token[:10]}...): {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[STARTUP] deleteWebhook error: {e}")
+
+_main_tok, _, _ = _get_token_and_cids()
+_delete_webhook_if_any(_main_tok)
+_delete_webhook_if_any(GOLD_BOT_TOKEN)
+
 threading.Thread(target=poll_telegram, daemon=True).start()
 threading.Thread(target=poll_gold_bot, daemon=True).start()
 print("[STARTUP] thread poll_telegram شروع شد")
