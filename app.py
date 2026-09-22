@@ -2084,6 +2084,7 @@ def poll_telegram():
                 params={"offset": last_id+1, "timeout": 20, "limit": 100},
                 timeout=30, headers=H)
             if r.status_code != 200:
+                print(f"[poll_telegram] getUpdates خطا داد: {r.status_code} — {r.text[:300]}")
                 time.sleep(10)
                 continue
             _all_updates = r.json().get("result", [])
@@ -6063,6 +6064,28 @@ def admin_panel_set_full_access(chat_id):
     return jsonify({"ok": True, "full_access": value})
 
 
+@app.route("/api/admin-panel/users/<chat_id>/private-access", methods=["POST"])
+def admin_panel_set_private_access(chat_id):
+    """فعال/غیرفعال کردن دسترسی «آلارم شخصی» برای یه کاربر — از پنل وب"""
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    body = request.json or {}
+    value = bool(body.get("value", False))
+    with _alerts_cache_lock:
+        data = load_alerts()
+        found = False
+        for u in data.get("users", []):
+            if str(u.get("chat_id", "")) == str(chat_id):
+                u["private_access"] = value
+                found = True
+                break
+        if not found:
+            return jsonify({"ok": False, "error": "کاربر پیدا نشد"}), 404
+        save_alerts(data)
+    return jsonify({"ok": True, "private_access": value})
+
+
 @app.route("/api/admin-panel/users/<chat_id>", methods=["DELETE"])
 def admin_panel_delete_user(chat_id):
     """حذف کاربر — دقیقاً همون منطق admin:confirmdelete تو تلگرام"""
@@ -6421,9 +6444,106 @@ def api_home_summary():
     return jsonify(data)
 
 
+@app.route("/api/all-alarms")
+def api_all_alarms():
+    """
+    نسخه‌ی عمومیِ /api/gold-alarms — برای همه‌ی نمادها (نه فقط طلا).
+    Query params: status=active|fired, page, per_page (پیش‌فرض ۱۰),
+                  from, to (YYYY-MM-DD), symbol (substring match، خالی = همه)
+    """
+    if not SUPABASE_KEY:
+        return jsonify({"ok": False, "error": "Supabase تنظیم نشده"}), 500
+
+    status = request.args.get("status", "fired")
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(50, max(1, int(request.args.get("per_page", 10))))
+    date_from = request.args.get("from", "").strip()
+    date_to = request.args.get("to", "").strip()
+    symbol_q = request.args.get("symbol", "").strip()
+
+    date_field = "created_at" if status == "active" else "fired_at"
+    params = {"order": f"{date_field}.desc"}
+    if status == "active":
+        params["active"] = "eq.true"
+    else:
+        params["fired_at"] = "not.is.null"
+    if symbol_q:
+        params["symbol"] = f"ilike.*{symbol_q}*"
+
+    and_conditions = []
+    if date_from:
+        and_conditions.append(f"{date_field}.gte.{date_from}")
+    if date_to:
+        and_conditions.append(f"{date_field}.lte.{date_to}T23:59:59")
+    if and_conditions:
+        params["and"] = f"({','.join(and_conditions)})"
+
+    offset = (page - 1) * per_page
+    headers = {**_sb_h(), "Prefer": "count=exact", "Range-Unit": "items",
+               "Range": f"{offset}-{offset + per_page - 1}"}
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/alerts", params=params, headers=headers, timeout=10)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"اتصال به Supabase ناموفق: {e}"}), 500
+
+    if r.status_code not in (200, 206):
+        return jsonify({"ok": False, "error": f"Supabase خطا داد ({r.status_code}): {r.text[:200]}"}), 500
+
+    total = 0
+    cr = r.headers.get("content-range", "")
+    if "/" in cr:
+        try: total = int(cr.split("/")[-1])
+        except Exception: pass
+
+    rows = r.json() if isinstance(r.json(), list) else []
+    pages = max(1, (total + per_page - 1) // per_page) if total else 1
+    page = min(page, pages)
+
+    out = [{
+        "id": a.get("id"),
+        "symbol": a.get("symbol"),
+        "condition": a.get("condition"),
+        "target_price": a.get("target_price"),
+        "created_by": a.get("created_by") or "—",
+        "created_at": a.get("created_at"),
+        "comment": a.get("comment") or "",
+        "fired_at": a.get("fired_at"),
+        "fired_price": a.get("fired_price"),
+        "instant": bool(a.get("instant")),
+    } for a in rows if not a.get("is_private")]
+
+    return jsonify({"ok": True, "items": out, "total": total, "page": page, "pages": pages})
+
+
+@app.route("/api/symbol-candles")
+def api_symbol_candles():
+    """کندل‌های خام یه نماد دلخواه از biquote.io — برای چارت صفحه‌ی همه‌آلارم‌ها"""
+    symbol = request.args.get("symbol", "").strip().upper()
+    interval = request.args.get("interval", "15m")
+    limit = min(1000, max(10, int(request.args.get("limit", 1000))))
+    if not symbol:
+        return jsonify({"ok": False, "error": "نماد مشخص نشده"}), 400
+    try:
+        r = requests.get(f"https://biquote.io/api/{symbol}/ohlc",
+                          params={"interval": interval, "limit": limit}, timeout=12)
+        r.raise_for_status()
+        bars = r.json().get("bars", [])
+        candles = [{"time": b["openTime"], "open": b["open"], "high": b["high"],
+                    "low": b["low"], "close": b["close"]} for b in bars]
+        return jsonify({"ok": True, "candles": candles})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"کندل‌ها لود نشد: {e}", "candles": []})
+
+
+@app.route("/all-alarms")
+def all_alarms_page():
+    return send_from_directory(app.static_folder, "all-alarms.html")
+
+
 @app.route("/gold-alarms")
 def gold_alarms_page():
     return send_from_directory(app.static_folder, "gold-alarms.html")
+
 
 
 @app.route("/api/gold-chart-data")
