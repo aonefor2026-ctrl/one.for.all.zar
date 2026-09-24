@@ -2276,8 +2276,20 @@ def _do_update(upd, token):
                                     # ادیت پیام برای همه‌ی چت‌هایی که این آلارم توشون ارسال شده
                                     tok_ack, _, _ = _get_token_and_cids()
                                     msg_map_ack = _fired_msg_ids.get(aid, {})
+                                    # اگه تو حافظه نبود (ری‌استارت / لود ناقص) مستقیم از Supabase بخون
+                                    if not msg_map_ack.get("__text__") and SUPABASE_KEY:
+                                        try:
+                                            r_fm = requests.get(
+                                                f"{SUPABASE_URL}/rest/v1/fired_msgs?id=eq.{aid}&select=msg_map",
+                                                headers=_sb_h(), timeout=8)
+                                            if r_fm.status_code == 200 and r_fm.json():
+                                                raw_fm = r_fm.json()[0].get("msg_map") or "{}"
+                                                msg_map_ack = json.loads(raw_fm) if isinstance(raw_fm, str) else (raw_fm or {})
+                                        except Exception as e:
+                                            print(f"[ack] fired_msgs fetch exc: {e}")
                                     base_text = msg_map_ack.get("__text__", "")
                                     if not base_text:
+                                        print(f"[ack] {aid} — map پیام‌ها پیدا نشد، ادیت انجام نشد")
                                         return
                                     ack_line = f"\n✅ <b>{name}</b> قبول کرد در ساعت {tlabel}"
                                     new_text = base_text + ack_line
@@ -2290,12 +2302,14 @@ def _do_update(upd, token):
                                             {"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc_ack}:{sym_ack}"}
                                         ]]}
                                         try:
-                                            requests.post(
+                                            r_ed = requests.post(
                                                 f"https://api.telegram.org/bot{tok_ack}/editMessageText",
                                                 json={"chat_id": tc_ack, "message_id": tm_ack,
                                                       "text": new_text, "parse_mode": "HTML",
                                                       "reply_markup": new_kb},
                                                 timeout=8, headers=H)
+                                            if r_ed.status_code != 200:
+                                                print(f"[ack] edit fail {tc_ack}: {r_ed.status_code} {r_ed.text[:150]}")
                                         except Exception as e:
                                             print(f"[ack] edit exc: {e}")
                                     # آپدیت متن ذخیره‌شده تا اگه دوباره چیزی edit بشه این تغییر از دست نره
