@@ -485,8 +485,12 @@
           <div><div class="user-name">${escapeHtml(u.name)}</div><div class="user-id">${escapeHtml(u.chat_id)}</div></div>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
-          <div style="display:flex; align-items:center; gap:6px;" title="دیدن کل آلارم‌ها (نه فقط آلارم‌های خودش)">
-            <span style="font-size:11px; color: var(--text-dim);">کل آلارم‌ها</span>
+          <div style="display:flex; align-items:center; gap:6px;" title="فعال کردن چک‌باکس «آلارم شخصی» (ربات + سایت) برای این کاربر">
+            <span style="font-size:11px; color: var(--text-dim);">آلارم شخصی</span>
+            <div class="switch${u.private_access ? ' on' : ''}" style="margin-right:0" id="pa-switch-${u.chat_id}" onclick="togglePrivateAccess('${u.chat_id}')"></div>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px;" title="دیدن آلارم‌های فعال (فایر نشده) بقیه، شامل آلارم‌های شخصی‌شون">
+            <span style="font-size:11px; color: var(--text-dim);">آلارم‌های بقیه</span>
             <div class="switch${u.full_access ? ' on' : ''}" style="margin-right:0" id="fa-switch-${u.chat_id}" onclick="toggleFullAccess('${u.chat_id}')"></div>
           </div>
           <button class="remove-x" onclick="deleteUser('${u.chat_id}', '${escapeHtml(u.name)}')">✕</button>
@@ -507,6 +511,27 @@
       if (data.ok){
         sw.classList.toggle('on', !!data.full_access);
         pulseToast(data.full_access ? 'دسترسی کامل داده شد' : 'دسترسی کامل گرفته شد');
+      } else {
+        pulseToast(data.error || 'خطا', true);
+      }
+    } catch(e){
+      sw.classList.remove('disabled');
+      pulseToast(e.message, true);
+    }
+  }
+
+  async function togglePrivateAccess(chatId){
+    const sw = document.getElementById('pa-switch-'+chatId);
+    const newValue = !sw.classList.contains('on');
+    sw.classList.add('disabled');
+    try{
+      const data = await apiCall('/api/admin-panel/users/'+chatId+'/private-access', {
+        method: 'POST', body: JSON.stringify({value: newValue})
+      });
+      sw.classList.remove('disabled');
+      if (data.ok){
+        sw.classList.toggle('on', !!data.private_access);
+        pulseToast(data.private_access ? 'آلارم شخصی فعال شد' : 'آلارم شخصی غیرفعال شد');
       } else {
         pulseToast(data.error || 'خطا', true);
       }
