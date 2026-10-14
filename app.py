@@ -6103,6 +6103,150 @@ def admin_panel_set_deprioritize():
     return jsonify({"ok": True, "active": value})
 
 
+# ─── پیام سیستمی تکرارشونده (از پنل ادمین) ─────────────────────────
+# یه پیام انگلیسی که هر N دقیقه از طرف «سیستم» (نه یه آدم) برای همه‌ی اعضای ربات ارسال می‌شه.
+# وضعیتش تو Supabase (ستون system_broadcast روی ردیف __config__) ذخیره می‌شه.
+_sysmsg_lock = threading.Lock()
+_sysmsg_state = {"active": False, "text": "", "interval_min": 2, "until": 0}
+
+def _sb_load_system_broadcast():
+    """None = خوندن ناموفق (state حافظه دست‌نخورده می‌مونه)"""
+    if not SUPABASE_KEY:
+        return None
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/alerts?id=eq.__config__&select=system_broadcast",
+            headers=_sb_h(), timeout=8)
+        if r.status_code == 200:
+            rows = r.json()
+            if rows:
+                val = rows[0].get("system_broadcast")
+                if val is None:
+                    return {}
+                return val if isinstance(val, dict) else json.loads(val)
+    except Exception as e:
+        print(f"[sysmsg] load exc: {e}")
+    return None
+
+def _sb_save_system_broadcast(state: dict):
+    if not SUPABASE_KEY:
+        return
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/alerts?id=eq.__config__",
+            headers={**_sb_h(), "Prefer": "return=minimal"},
+            json={"system_broadcast": state}, timeout=8)
+        if r.status_code >= 300:
+            print(f"[sysmsg] save failed: {r.status_code} {r.text[:120]}")
+    except Exception as e:
+        print(f"[sysmsg] save exc: {e}")
+
+def _sysmsg_apply(remote: dict):
+    """state حافظه رو با چیزی که از Supabase خونده شد هماهنگ کن"""
+    with _sysmsg_lock:
+        _sysmsg_state["active"] = bool(remote.get("active", False))
+        _sysmsg_state["text"] = str(remote.get("text", "") or "")
+        try:
+            _sysmsg_state["interval_min"] = max(1, min(60, int(remote.get("interval_min", 2))))
+        except (TypeError, ValueError):
+            _sysmsg_state["interval_min"] = 2
+        try:
+            _sysmsg_state["until"] = float(remote.get("until", 0) or 0)
+        except (TypeError, ValueError):
+            _sysmsg_state["until"] = 0
+
+def _sysmsg_format(text: str) -> str:
+    import html as _html
+    return "⚙️ <b>System Notice</b>\n\n" + _html.escape(text, quote=False)
+
+def system_broadcast_loop():
+    last_sent = 0.0
+    try:
+        remote = _sb_load_system_broadcast()
+        if remote:
+            _sysmsg_apply(remote)
+    except Exception as e:
+        print(f"[sysmsg] startup load: {e}")
+    while True:
+        try:
+            with _sysmsg_lock:
+                st = dict(_sysmsg_state)
+            if st["active"]:
+                now = time.time()
+                if st["until"] and now >= st["until"]:
+                    with _sysmsg_lock:
+                        _sysmsg_state["active"] = False
+                        snap = dict(_sysmsg_state)
+                    _sb_save_system_broadcast(snap)
+                    print("[sysmsg] زمان توقف خودکار رسید — متوقف شد")
+                elif st["text"].strip() and now - last_sent >= st["interval_min"] * 60:
+                    # قبل از هر ارسال از Supabase بخون تا توقف از جای دیگه هم اعمال بشه
+                    remote = _sb_load_system_broadcast()
+                    if remote is not None and remote:
+                        _sysmsg_apply(remote)
+                    with _sysmsg_lock:
+                        st = dict(_sysmsg_state)
+                    if st["active"] and st["text"].strip():
+                        token, cids, _ = _get_token_and_cids()
+                        if token and cids:
+                            broadcast(token, cids, _sysmsg_format(st["text"]))
+                            print(f"[sysmsg] ارسال شد به {len(cids)} نفر")
+                        last_sent = time.time()
+        except Exception as e:
+            print(f"[sysmsg] loop error: {e}")
+        time.sleep(5)
+
+@app.route("/api/admin-panel/system-broadcast", methods=["GET"])
+def admin_panel_get_system_broadcast():
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    remote = _sb_load_system_broadcast()
+    if remote:
+        _sysmsg_apply(remote)
+    with _sysmsg_lock:
+        st = dict(_sysmsg_state)
+    remaining = max(0, int(st["until"] - time.time())) if st["until"] else 0
+    return jsonify({"ok": True, "active": st["active"], "text": st["text"],
+                    "interval_min": st["interval_min"], "remaining_sec": remaining})
+
+@app.route("/api/admin-panel/system-broadcast", methods=["POST"])
+def admin_panel_set_system_broadcast():
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    body = request.json or {}
+    text = str(body.get("text", "") or "").strip()
+    if len(text) > 3500:
+        return jsonify({"ok": False, "error": "متن خیلی طولانیه (حداکثر ۳۵۰۰ کاراکتر)"}), 400
+    try:
+        interval_min = max(1, min(60, int(body.get("interval_min", 2))))
+        stop_after_min = max(0, min(1440, int(body.get("stop_after_min", 0) or 0)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "عدد نامعتبر"}), 400
+
+    # ارسال تستی فقط برای خود ادمین — چیزی ذخیره یا فعال نمی‌شه
+    if body.get("test"):
+        if not text:
+            return jsonify({"ok": False, "error": "متن خالیه"}), 400
+        token, _, _ = _get_token_and_cids()
+        if not token:
+            return jsonify({"ok": False, "error": "توکن ربات پیدا نشد"}), 500
+        ok = send_tg(token, YOUR_CHAT_ID, _sysmsg_format(text))
+        return jsonify({"ok": bool(ok), "error": None if ok else "ارسال تستی ناموفق بود"})
+
+    active = bool(body.get("active", False))
+    if active and not text:
+        return jsonify({"ok": False, "error": "برای فعال کردن، اول متن رو بنویس"}), 400
+    until = (time.time() + stop_after_min * 60) if (active and stop_after_min > 0) else 0
+    with _sysmsg_lock:
+        _sysmsg_state.update({"active": active, "text": text,
+                              "interval_min": interval_min, "until": until})
+        snap = dict(_sysmsg_state)
+    _sb_save_system_broadcast(snap)
+    return jsonify({"ok": True, "active": active, "interval_min": interval_min})
+
+
 @app.route("/api/admin-panel/muted-instant-senders", methods=["GET"])
 def admin_panel_get_muted_instant():
     """لیست فعلی افرادی که آلارم فوریشون ذخیره میشه ولی به تلگرام ارسال نمیشه"""
@@ -6187,6 +6331,8 @@ def _restore_reminders():
     print(f"[STARTUP] reminder: {count} هشدار بازیابی شد")
 threading.Thread(target=_restore_reminders, daemon=True).start()
 threading.Thread(target=daily_news_scheduler, daemon=True).start()
+threading.Thread(target=system_broadcast_loop, daemon=True).start()
+print("[STARTUP] thread system_broadcast_loop شروع شد")
 print(f"[STARTUP] thread daily_news_scheduler شروع شد — ارسال ساعت {FF_NEWS_HOUR:02d}:{FF_NEWS_MINUTE:02d} تهران")
 # ربات جدا و مخصوص طلا (تستی) — هرکی /start بزنه، مشترک می‌شه و همه‌ی آلارم‌های طلا رو می‌بینه
 _gold_bot_subscribers: set = set()

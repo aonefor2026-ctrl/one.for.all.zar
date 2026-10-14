@@ -306,6 +306,41 @@
       <div class="user-list" id="mutedSendersList"></div>
     </div>
 
+    <div class="section-label">پیام سیستمی تکرارشونده</div>
+    <div class="card">
+      <div class="card-icon-row">
+        <div>
+          <div class="card-title">ارسال خودکار پیام از طرف سیستم</div>
+          <div class="card-desc" style="margin-bottom:0">متن زیر (انگلیسی) هر چند دقیقه یه بار با عنوان «System Notice» برای همه‌ی اعضای ربات ارسال می‌شه، بدون اینکه اسم کسی روش باشه.</div>
+        </div>
+        <div class="card-icon">📢</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 10px">
+        <button class="btn-mini" onclick="fillSysMsg(0)">پیشنهاد ۱</button>
+        <button class="btn-mini" onclick="fillSysMsg(1)">پیشنهاد ۲</button>
+        <button class="btn-mini" onclick="fillSysMsg(2)">پیشنهاد ۳</button>
+      </div>
+      <textarea class="text-input" id="sysMsgText" dir="ltr" rows="5" maxlength="3500" placeholder="Write the message here..." style="resize:vertical;line-height:1.6"></textarea>
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        <div style="flex:1">
+          <div class="t-desc" style="margin-bottom:5px;color:var(--text-dim);font-size:11.5px">هر چند دقیقه ارسال شه</div>
+          <input type="number" class="text-input" id="sysMsgInterval" value="2" min="1" max="60" dir="ltr" style="margin-bottom:0">
+        </div>
+        <div style="flex:1">
+          <div class="t-desc" style="margin-bottom:5px;color:var(--text-dim);font-size:11.5px">توقف خودکار بعد از (دقیقه، 0 = ندارد)</div>
+          <input type="number" class="text-input" id="sysMsgStopAfter" value="30" min="0" max="1440" dir="ltr" style="margin-bottom:0">
+        </div>
+      </div>
+      <div class="toggle-row" style="margin-bottom:12px">
+        <div class="toggle-info">
+          <div class="t-name">ارسال خودکار</div>
+          <div class="t-desc" id="sysMsgStatus">در حال بارگذاری...</div>
+        </div>
+        <div class="switch" id="sysMsgSwitch" onclick="toggleSysMsg()"></div>
+      </div>
+      <button class="btn-mini" onclick="testSysMsg()" style="width:100%;padding:11px">ارسال تستی فقط برای خودم</button>
+    </div>
+
     <div class="section-label">منطقه‌ی خطر</div>
     <div class="card" style="border-color: rgba(204,97,83,.25);">
       <div class="card-icon-row">
@@ -380,6 +415,7 @@
     loadDeprioritize();
     loadMutedSenders();
     loadTeamAvailability();
+    loadSysMsg();
   }
 
   function logout(){
@@ -603,6 +639,66 @@
       } else {
         pulseToast(data.error || 'خطا', true);
       }
+    } catch(e){ pulseToast(e.message, true); }
+  }
+
+  const SYS_MSG_SUGGESTIONS = [
+    "CRITICAL ERROR 0x7F3A: Unhandled exception in core module. Unknown process interrupted the alert engine. Connection to server lost. Retrying...",
+    "ERROR 503: Unexpected fault detected. Service unavailable. Automatic recovery failed. Retrying...",
+    "WARNING: Unrecognized signal received from an unknown source. Alert engine halted unexpectedly. Error log has been generated."
+  ];
+  function fillSysMsg(i){ document.getElementById('sysMsgText').value = SYS_MSG_SUGGESTIONS[i]; }
+
+  function renderSysMsg(d){
+    document.getElementById('sysMsgSwitch').classList.toggle('on', !!d.active);
+    const ta = document.getElementById('sysMsgText');
+    if (document.activeElement !== ta && d.text !== undefined) ta.value = d.text || ta.value;
+    if (d.interval_min) document.getElementById('sysMsgInterval').value = d.interval_min;
+    let s = d.active ? ('فعال — هر ' + (d.interval_min||2) + ' دقیقه ارسال می‌شه') : 'خاموشه — چیزی ارسال نمی‌شه';
+    if (d.active && d.remaining_sec) s += ' — توقف خودکار تا ' + Math.ceil(d.remaining_sec/60) + ' دقیقه‌ی دیگه';
+    document.getElementById('sysMsgStatus').textContent = s;
+  }
+
+  async function loadSysMsg(){
+    try{
+      const d = await apiCall('/api/admin-panel/system-broadcast');
+      if (!d.ok) throw new Error(d.error);
+      renderSysMsg(d);
+    } catch(e){
+      document.getElementById('sysMsgStatus').textContent = 'خطا در بارگذاری: ' + e.message;
+    }
+  }
+
+  function sysMsgPayload(extra){
+    return Object.assign({
+      text: document.getElementById('sysMsgText').value.trim(),
+      interval_min: parseInt(document.getElementById('sysMsgInterval').value) || 2,
+      stop_after_min: parseInt(document.getElementById('sysMsgStopAfter').value) || 0
+    }, extra || {});
+  }
+
+  async function toggleSysMsg(){
+    const sw = document.getElementById('sysMsgSwitch');
+    const newValue = !sw.classList.contains('on');
+    sw.classList.add('disabled');
+    try{
+      const d = await apiCall('/api/admin-panel/system-broadcast', {
+        method:'POST', body: JSON.stringify(sysMsgPayload({active:newValue}))
+      });
+      sw.classList.remove('disabled');
+      if (d.ok){
+        pulseToast(newValue ? 'ارسال خودکار شروع شد' : 'ارسال خودکار متوقف شد');
+        loadSysMsg();
+      } else pulseToast(d.error || 'خطا', true);
+    } catch(e){ sw.classList.remove('disabled'); pulseToast(e.message, true); }
+  }
+
+  async function testSysMsg(){
+    try{
+      const d = await apiCall('/api/admin-panel/system-broadcast', {
+        method:'POST', body: JSON.stringify(sysMsgPayload({test:true}))
+      });
+      pulseToast(d.ok ? 'پیام تستی برات ارسال شد' : (d.error || 'خطا'), !d.ok);
     } catch(e){ pulseToast(e.message, true); }
   }
 
