@@ -513,6 +513,30 @@ select option{background:var(--bg3)}
 .sig-list-del { background:none; border:none; color:var(--text3); cursor:pointer; padding:4px 8px; border-radius:6px; font-size:13px; transition:.15s; }
 .sig-list-del:hover { background:var(--rdim); color:var(--red); }
 /* ====================================================== */
+
+/* ── آلارم شخصی: کارت + چک‌لیست ── */
+.fld label.pv-card{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:12px;width:100%;margin-bottom:0;letter-spacing:normal;font-family:var(--sans);color:var(--text);box-sizing:border-box;padding:12px 14px;border:1px solid var(--border2);border-radius:var(--rad);background:var(--bg3);cursor:pointer;transition:border-color .2s,background .2s,box-shadow .2s;-webkit-tap-highlight-color:transparent}
+.pv-card:active{transform:scale(.99)}
+.pv-chk{position:absolute;opacity:0;pointer-events:none}
+.pv-box{width:26px;height:26px;flex-shrink:0;border-radius:8px;border:2px solid var(--border3);display:flex;align-items:center;justify-content:center;color:transparent;transition:all .2s}
+.pv-box svg{transform:scale(.4);opacity:0;transition:transform .25s cubic-bezier(.3,1.6,.5,1),opacity .15s}
+.pv-txt{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.pv-txt b{font-size:13px;color:var(--text)}
+.pv-txt small{font-size:11px;color:var(--text2)}
+.pv-list{display:flex;flex-direction:column;width:100%;opacity:0;transition:opacity .25s ease}
+.pv-item{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--text2);padding:0;max-height:0;overflow:hidden;transition:max-height .3s ease,padding .3s ease,color .2s}
+.pv-item i{font-style:normal;width:18px;height:18px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:var(--purple);color:#fff}
+.pv-chk:checked~.pv-box{background:var(--purple);border-color:var(--purple);color:#fff}
+.pv-chk:checked~.pv-box svg{transform:scale(1);opacity:1}
+.pv-card:has(.pv-chk:checked){border-color:var(--purple);background:var(--purdim);box-shadow:0 0 0 3px rgba(160,112,255,.12)}
+.pv-chk:checked~.pv-txt b{color:var(--purple)}
+.pv-chk:checked~.pv-list{opacity:1;border-top:1px dashed rgba(160,112,255,.35);padding-top:6px}
+.pv-chk:checked~.pv-list .pv-item{max-height:34px;padding:4px 0;color:var(--text)}
+.pv-chk:checked~.pv-list .pv-item i{animation:pvPop .35s ease both}
+.pv-chk:checked~.pv-list .pv-item:nth-child(2) i{animation-delay:.08s}
+.pv-chk:checked~.pv-list .pv-item:nth-child(3) i{animation-delay:.16s}
+.pv-chk:focus-visible~.pv-box{outline:2px solid var(--purple);outline-offset:2px}
+@keyframes pvPop{0%{transform:scale(0)}70%{transform:scale(1.25)}100%{transform:scale(1)}}
 </style>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -607,9 +631,15 @@ select option{background:var(--bg3)}
           <div class="fld"><label>یادداشت (اختیاری)</label><input type="text" id="acmt" placeholder="سطح کلیدی..."></div>
           <div class="fld"><label>انقضا (روز — خالی = بدون انقضا)</label><input type="number" id="aexp" placeholder="مثلاً 3" min="1" step="1" dir="ltr"></div>
           <div class="fld" id="private-fld" style="display:none">
-            <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-              <input type="checkbox" id="private-chk" style="width:16px;height:16px">
-              🔒 آلارم شخصی (فقط برای خودم در ربات ارسال بشه)
+            <label class="pv-card" for="private-chk">
+              <input type="checkbox" id="private-chk" class="pv-chk">
+              <span class="pv-box"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+              <span class="pv-txt"><b>🔒 آلارم شخصی</b><small>فقط برای خودم در ربات ارسال بشه</small></span>
+              <span class="pv-list">
+                <span class="pv-item"><i>✓</i>فایر شدن فقط توی ربات خودت میاد</span>
+                <span class="pv-item"><i>✓</i>توی لیست آلارم‌های تیم دیده نمی‌شه</span>
+                <span class="pv-item"><i>✓</i>بقیه‌ی اعضا هیچ پیامی دریافت نمی‌کنن</span>
+              </span>
             </label>
           </div>
           <div class="fld" style="display:flex;align-items:flex-end;gap:8px">
