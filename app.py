@@ -2026,7 +2026,7 @@ def get_me():
     return jsonify({
         "ok": True,
         "verified": True,
-        "private_access": bool(u.get("private_access")),
+        "private_access": bool(u.get("private_access")) or str(u.get("chat_id", "")) == str(YOUR_CHAT_ID),
         "full_access": bool(u.get("full_access")),
     })
 
@@ -3790,16 +3790,6 @@ def _do_update(upd, token):
                         _sb_upsert_alert(new_alert_ae)
                         _cache_alerts = d_ae
                         del _pending_alarm[ae_cid]
-                        if "XAU" in sym_ae.upper():
-                            _gb_arrow_ae = "📈 ناحیه سل" if new_alert_ae["condition"] == "above" else "📉 ناحیه بای"
-                            _gb_cmt_ae = f"\n💬 {comment_ae}" if comment_ae else ""
-                            _broadcast_to_gold_bot(
-                                f"🆕 آلارم قیمت طلا ست شد\n\n"
-                                f"💰 {sym_ae} — {_gb_arrow_ae}\n"
-                                f"🎯 هدف: {fmt_price(new_alert_ae['target_price'], sym_ae)}\n"
-                                f"👤 {sender_ae}"
-                                f"{_gb_cmt_ae}\n\n⏰ {now_teh()} (تهران)"
-                            )
                         dir_lbl_ae = "📈 BUY" if new_alert_ae["condition"] == "below" else "📉 SELL"
                         priv_lbl_ae = "  🔒 شخصی" if is_private_ae else "  🌐 تیمی"
                         expiry_lbl_ae = f"\n⏳ اعتبار: {ae_days} روز (تا {expires_at_ae[:10]})" if expires_at_ae else "\n♾ بدون انقضا"
@@ -3889,8 +3879,6 @@ def _do_update(upd, token):
                         def _bg_sos(tok=token_cbq, tgts=targets_sc, msg=out_sc, s=sym_sc, aid=sos_aid,
                                     atag=alarm_num_tag_sc, sndr=sender_sc, cond=condition_sc, atp=atype_sc, cur=cur_sc):
                             sos_cid_to_mid = {}
-                            if "XAU" in s.upper():
-                                _broadcast_to_gold_bot(msg + f"\n📅 ثبت: {now_teh()}")
                             if s.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sndr):
                                 for tc_sc in tgts:
                                     kb_sc = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc_sc}:{s}"}]]
@@ -4734,8 +4722,6 @@ def _do_update(upd, token):
                                 + (f"💬 {comment_s}\n" if comment_s else "")
                                 + f"⏰ {now_pretty()} (تهران)", [])
                         # broadcast به بقیه
-                        if "XAU" in sym_s.upper():
-                            _broadcast_to_gold_bot(out_s + f"\n📅 ثبت: {now_teh()}")
                         if sym_s.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sender_s):
                             for tc2 in targets2:
                                 kb2 = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc2}:{sym_s}"}]]
@@ -4869,8 +4855,6 @@ def _do_update(upd, token):
                         targets = all_cids if BROADCAST_MODE else [YOUR_CHAT_ID]
                         sos_aid_txt = f"sos_{sym}_{int(time.time())}"
                         sos_cid_to_mid_txt = {}
-                        if "XAU" in sym.upper():
-                            _broadcast_to_gold_bot(out_msg + f"\n📅 ثبت: {now_teh()}")
                         if sym.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sender_name):
                             for tc in targets:
                                 mid_sos_txt = send_tg_keyboard(token, tc, out_msg,
@@ -4932,16 +4916,6 @@ def _do_update(upd, token):
                             d["alerts"].append(new_alert)
                             _sb_upsert_alert(new_alert)
                             _cache_alerts = d
-                            if "XAU" in sym.upper():
-                                _gb_arrow = "📈 ناحیه سل" if condition == "above" else "📉 ناحیه بای"
-                                _gb_cmt = f"\n💬 {comment}" if comment else ""
-                                _broadcast_to_gold_bot(
-                                    f"🆕 آلارم قیمت طلا ست شد\n\n"
-                                    f"💰 {sym} — {_gb_arrow}\n"
-                                    f"🎯 هدف: {fmt_price(tgt_f, sym)}\n"
-                                    f"👤 {sender_name}"
-                                    f"{_gb_cmt}\n\n⏰ {now_pretty()} (تهران)"
-                                )
                             _is_adm_alarm = (cid == YOUR_CHAT_ID)
                             confirm_alarm_txt = (
                                 f"✅ آلارم ثبت شد\n\n"
@@ -5002,16 +4976,6 @@ def _do_update(upd, token):
                                 d["alerts"].append(new_alert)
                                 _sb_upsert_alert(new_alert)
                                 _cache_alerts = d
-                                if "XAU" in sym.upper():
-                                    _gb_arrow2 = "📈 ناحیه سل" if condition == "above" else "📉 ناحیه بای"
-                                    _gb_cmt2 = f"\n💬 {comment}" if comment else ""
-                                    _broadcast_to_gold_bot(
-                                        f"🆕 آلارم قیمت طلا (شخصی) ست شد\n\n"
-                                        f"💰 {sym} — {_gb_arrow2}\n"
-                                        f"🎯 هدف: {fmt_price(tgt_f, sym)}\n"
-                                        f"👤 {sender_name}"
-                                        f"{_gb_cmt2}\n\n⏰ {now_pretty()} (تهران)"
-                                    )
                                 _is_adm_me = (cid == YOUR_CHAT_ID)
                                 _me_dir = "📈 BUY" if condition == "below" else "📉 SELL"
                                 _me_confirm = (
@@ -5079,7 +5043,7 @@ _loop_count = 0
 # حلقه‌ی live price هر ۱ دقیقه یک بار اجرا می‌شود.
 CHECK_INTERVAL_SECONDS = 60
 # ⏸️ موقت: نمادهایی که آلارمشون فایر می‌شه ولی پیام تلگرام نمی‌فرستیم (فقط طلا، فعلاً)
-TEMP_MUTED_SYMBOLS = {"XAUUSD"}
+TEMP_MUTED_SYMBOLS = set()
 # refresh آلارم‌های فعال از Supabase هر ۵ دور = حدود ۱۰ دقیقه یک بار.
 ACTIVE_REFRESH_EVERY_LOOPS = 5
 
@@ -5287,23 +5251,6 @@ def check_alerts():
                     # 🔒 فوری و سینک قبل از هرکاری (ارسال پیام/تعیین مسئول) تو Supabase ذخیره می‌کنیم —
                     # تا اگه سرور وسط ارسال پیام‌ها کرش/ریستارت کرد، این آلارم already-fired بمونه و دوباره فایر نشه
                     save_alert_fired(a)
-                    if "XAU" in sym.upper():
-                        _gb_arrow = "📈 ناحیه سل" if cond == "above" else "📉 ناحیه بای"
-                        _gb_creator = a.get("created_by") or "سیستم"
-                        _gb_comment = a.get("comment", "")
-                        _gb_cmt = f"\n💬 {_gb_comment}" if _gb_comment else ""
-                        _gb_created = a.get("created_at", "—")
-                        _gb_msg = (
-                            f"🚨 آلارم قیمت طلا فایر شد!\n\n"
-                            f"💰 {sym} — {_gb_arrow}\n"
-                            f"🎯 هدف: {fmt_price(tgt, sym)}\n"
-                            f"📊 قیمت فایر: {fmt_price(cur, sym)}\n"
-                            f"👤 {_gb_creator}"
-                            f"{_gb_cmt}\n"
-                            f"📅 ثبت: {_gb_created}\n"
-                            f"⏰ فایر: {now_pretty()} (تهران)"
-                        )
-                        _broadcast_to_gold_bot(_gb_msg)
                     # ⏸️ موقت: آلارم طلا (XAUUSD) فایر می‌شه و ثبت می‌شه، فقط پیام تلگرام ارسال نشه
                     if sym.upper() in TEMP_MUTED_SYMBOLS:
                         print(f"[FILTER] {sym} در لیست موقت بی‌صدا — پیام تلگرام ارسال نشد")
@@ -5504,7 +5451,7 @@ def add_alert():
     private_cid = None
     if bool(body.get("is_private", False)):
         u_priv = _verified_user_by_name(creator, pin)
-        if u_priv and u_priv.get("private_access"):
+        if u_priv and (u_priv.get("private_access") or str(u_priv.get("chat_id", "")) == str(YOUR_CHAT_ID)):
             is_private = True
             private_cid = str(u_priv.get("chat_id", ""))
     cur = get_price(sym, atype) if (atype!="forex" or is_forex_market_open()) else None
@@ -5534,16 +5481,6 @@ def add_alert():
         data = load_alerts()
         data["alerts"].append(a)
         save_alerts(data)
-    if "XAU" in sym.upper():
-        _gb_arrow3 = "📈 ناحیه سل" if a["condition"] == "above" else "📉 ناحیه بای"
-        _gb_cmt3 = f"\n💬 {a['comment']}" if a.get("comment") else ""
-        _broadcast_to_gold_bot(
-            f"🆕 آلارم قیمت طلا ست شد (از سایت)\n\n"
-            f"💰 {sym} — {_gb_arrow3}\n"
-            f"🎯 هدف: {fmt_price(tgt, sym)}\n"
-            f"👤 {a['created_by']}"
-            f"{_gb_cmt3}\n\n⏰ {now_pretty()} (تهران)"
-        )
     return jsonify({"ok": True, "alert": a})
 
 @app.route("/api/alarm-assignments/<aid>/false", methods=["POST"])
@@ -5665,8 +5602,6 @@ def instant_alert():
 
     # هر کاربر جداگانه با دکمه هشدار دوره‌ای
     sent_count = 0
-    if "XAU" in sym.upper():
-        _broadcast_to_gold_bot(out_msg + f"\n📅 ثبت: {now_teh()}")
     if sym.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(_creator):
         for cid in targets:
             kb = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{cid}:{sym}"}]]
