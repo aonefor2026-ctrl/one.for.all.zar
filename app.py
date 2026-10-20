@@ -886,12 +886,13 @@ def _rating_keyboard(alert_id: str, state: dict) -> list:
     if state.get("closed"):
         return []
     aid = str(alert_id)
+    # تلگرام رنگ واقعی دکمه نداره — با ایموجی طیف قرمز→سبز
     return [[
-        {"text": "1", "callback_data": f"rate:{aid}:1"},
-        {"text": "2", "callback_data": f"rate:{aid}:2"},
-        {"text": "3", "callback_data": f"rate:{aid}:3"},
-        {"text": "4", "callback_data": f"rate:{aid}:4"},
-        {"text": "5", "callback_data": f"rate:{aid}:5"},
+        {"text": "🔴 1", "callback_data": f"rate:{aid}:1"},
+        {"text": "🟠 2", "callback_data": f"rate:{aid}:2"},
+        {"text": "🟡 3", "callback_data": f"rate:{aid}:3"},
+        {"text": "🟢 4", "callback_data": f"rate:{aid}:4"},
+        {"text": "💚 5", "callback_data": f"rate:{aid}:5"},
     ]]
 
 def _refresh_rating_messages(token: str, alert_id: str, creator_name: str):
