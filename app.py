@@ -1324,97 +1324,6 @@ def answer_callback(token, callback_id, text=""):
             timeout=10, headers=H)
     except: pass
 
-# ── reminder state ─────────────────────────────────────────────
-# memory: { cid: { sym: {"interval": int, "active": bool, "tf_sec": int} } }
-# Supabase: جدول reminders — هر ردیف یه reminder فعال
-_reminders = {}
-
-# ── candle-close helpers ──────────────────────────────────────
-_TF_OFFSET = {300: 60, 900: 300, 3600: 900, 14400: 900}  # ثانیه قبل از کلوز
-_TF_LABEL  = {300:"M5", 900:"M15", 3600:"H1", 14400:"H4"}
-REMINDER_QUICK_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSDT", "ETHUSDT", "USDJPY"]
-
-def _candle_info(tf_sec):
-    """
-    برمی‌گردونه: (wait_sec, close_teh_str, progress_pct)
-    - اگه هنوز وقت هشدار این کندل نرسیده → صبر کن
-    - اگه توی پنجره هشدار هستیم (بین alert_time و close) → فوری (۵ ثانیه)
-    - اگه کندل بسته → کندل بعدی
-    """
-    offset = _TF_OFFSET.get(tf_sec, 300)
-    now_utc = time.time()
-    cur_close = (int(now_utc) // tf_sec + 1) * tf_sec
-    alert_t   = cur_close - offset
-    wait      = alert_t - now_utc
-    if wait <= 0:
-        if now_utc < cur_close:
-            wait, use_close = 5, cur_close          # توی پنجره → فوری
-        else:
-            use_close = cur_close + tf_sec          # کندل بسته → بعدی
-            wait = (use_close - offset) - now_utc
-    else:
-        use_close = cur_close
-    from datetime import datetime as _dt
-    close_teh = _dt.fromtimestamp(use_close, tz=TEHRAN).strftime("%H:%M")
-    elapsed   = now_utc - (use_close - tf_sec)
-    progress  = min(99, int(elapsed / tf_sec * 100))
-    return max(int(wait), 5), close_teh, progress
-
-# ── Supabase reminder helpers ────────────────────────────────
-def _sb_save_reminder(cid, sym, interval_sec, tf_sec=0):
-    """ذخیره یه reminder در Supabase"""
-    if not SUPABASE_KEY: return
-    rid = f"{cid}_{sym}"
-    try:
-        payload = {
-            "id": rid, "chat_id": str(cid), "symbol": sym,
-            "interval_sec": interval_sec, "tf_sec": tf_sec,
-            "created_at": now_teh(), "active": True
-        }
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/reminders",
-            headers={**_sb_h(), "Prefer": "resolution=merge-duplicates,return=minimal"},
-            json=payload, timeout=8)
-        if r.status_code not in (200,201,204):
-            print(f"[reminder] save error: {r.status_code} {r.text[:60]}")
-    except Exception as e:
-        print(f"[reminder] save exc: {e}")
-
-def _sb_delete_reminder(cid, sym):
-    """حذف یه reminder از Supabase"""
-    if not SUPABASE_KEY: return
-    rid = f"{cid}_{sym}"
-    try:
-        requests.delete(
-            f"{SUPABASE_URL}/rest/v1/reminders?id=eq.{rid}",
-            headers=_sb_h(), timeout=8)
-    except Exception as e:
-        print(f"[reminder] delete exc: {e}")
-
-def _sb_delete_all_reminders(cid):
-    """حذف همه reminder‌های یه کاربر از Supabase"""
-    if not SUPABASE_KEY: return
-    try:
-        requests.delete(
-            f"{SUPABASE_URL}/rest/v1/reminders?chat_id=eq.{cid}",
-            headers=_sb_h(), timeout=8)
-    except Exception as e:
-        print(f"[reminder] delete_all exc: {e}")
-
-def _sb_load_reminders():
-    """لود همه reminder‌های فعال از Supabase — برای startup"""
-    if not SUPABASE_KEY: return []
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/reminders?active=eq.true&select=*",
-            headers=_sb_h(), timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        print(f"[reminder] load error: {r.status_code}")
-    except Exception as e:
-        print(f"[reminder] load exc: {e}")
-    return []
-
 def _delete_msg_after(token, cid, msg_id, delay=120):
     """پیام رو بعد از delay ثانیه پاک کن"""
     def _do():
@@ -1601,83 +1510,6 @@ def _show_signal_preview(token, cid, mid, data):
         [{"text": "❌ لغو", "callback_data": f"sig_cancel:{cid}"}],
     ]
     edit_tg_keyboard(token, cid, mid, preview, kb)
-
-def _send_reminder(token, cid, sym, tf_sec=0):
-    """پیام هشدار کلوز کندل — حذف ۵ دقیقه بعد از ارسال"""
-    tf_label = _TF_LABEL.get(tf_sec, "")
-    if tf_sec and tf_label:
-        _, close_teh, progress = _candle_info(tf_sec)
-        offset_min = _TF_OFFSET.get(tf_sec, 300) // 60
-        msg = (f"🕯 <b>کلوز کندل {tf_label} — {sym}</b>\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"⏰ کلوز تهران: <b>{close_teh}</b>\n"
-               f"⏳ مانده تا کلوز: <b>~{offset_min} دقیقه</b>\n"
-               f"📊 پیشرفت کندل: <b>{progress}%</b>\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"🗑 این پیام ۵ دقیقه دیگه حذف میشه.")
-    else:
-        msg = f"⚠️ <b>یادآوری:</b> <code>{sym}</code> بررسی بشه!\n\n🗑 این پیام ۵ دقیقه دیگه حذف میشه."
-    kb = [[{"text": f"✕ کنسل {sym}", "callback_data": f"cancel_reminder_one:{cid}:{sym}"}]]
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": cid, "text": msg, "parse_mode": "HTML",
-                  "reply_markup": {"inline_keyboard": kb}},
-            timeout=10, headers=H)
-        mid = r.json().get("result", {}).get("message_id")
-        if mid:
-            _delete_msg_after(token, cid, mid, delay=300)  # ۵ دقیقه
-    except: pass
-
-def _schedule_reminder(token, cid, sym, interval_sec, persist=True, tf_sec=0):
-    """
-    هشدار کلوز کندل — هر چرخه:
-      1. محاسبه دقیق چند ثانیه تا هشدار کلوز بعدی
-      2. sleep
-      3. یه پیام بفرست
-      4. برگرد به ۱ (برای کندل بعدی)
-    tf_sec: طول تایم‌فریم (M5=300, M15=900, H1=3600, H4=14400)
-    interval_sec: همون tf_sec هست (برای سازگاری Supabase)
-    """
-    tf = tf_sec or interval_sec
-    if cid not in _reminders:
-        _reminders[cid] = {}
-    _reminders[cid][sym] = {"interval": tf, "active": True, "tf_sec": tf}
-    entry = _reminders[cid][sym]
-    if persist:
-        threading.Thread(target=_sb_save_reminder, args=(cid, sym, tf, tf), daemon=True).start()
-    def _loop():
-        while entry.get("active") and _reminders.get(cid, {}).get(sym, {}).get("active"):
-            wait, _, _ = _candle_info(entry["tf_sec"])
-            time.sleep(wait)
-            if not _reminders.get(cid, {}).get(sym, {}).get("active"):
-                break
-            _send_reminder(token, cid, sym, tf_sec=entry["tf_sec"])
-            # بعد از ارسال پیام، صبر کن تا کلوز کندل رد بشه — جلوی تکرار رو میگیره
-            tf = entry["tf_sec"]
-            now_utc = time.time()
-            cur_close = (int(now_utc) // tf + 1) * tf
-            sleep_after = cur_close - now_utc + 5  # ۵ ثانیه بعد از کلوز
-            if sleep_after > 0:
-                time.sleep(sleep_after)
-    threading.Thread(target=_loop, daemon=True).start()
-
-def build_cancel_reminder_msg(cid):
-    """لیست هشدارهای فعال با دکمه حذف جداگانه"""
-    active = _reminders.get(cid, {})
-    if not active:
-        return "هیچ هشدار دوره‌ای فعالی نداری.", []
-    labels = {300:"۵ دقیقه", 900:"۱۵ دقیقه", 3600:"۱ ساعت", 14400:"۴ ساعت"}
-    lines = ["⏰ <b>هشدارهای دوره‌ای فعال:</b>\n"]
-    keyboard = []
-    for sym, info in active.items():
-        tf = info.get("tf_sec", info.get("interval", 0))
-        lbl = _TF_LABEL.get(tf, f"{tf//60}m") if tf else "؟"
-        lines.append(f"• <b>{sym}</b> — کلوز {lbl}")
-        keyboard.append([{"text": f"🗑 حذف {sym}", "callback_data": f"cancel_reminder_one:{cid}:{sym}"}])
-    keyboard.append([{"text": "✕ کنسل همه", "callback_data": f"cancel_reminder_all:{cid}"}])
-    keyboard.append([{"text": "✓ بستن", "callback_data": "close_myalerts"}])
-    return "\n".join(lines), keyboard
 
 def build_myalerts_msg(cid):
     """متن و keyboard لیست آلارم‌های شخصی"""
@@ -1900,7 +1732,6 @@ def _check_news_reminders(now):
 
 _pending_name  = {}  # cid → True
 _pending_alarm = {}  # cid → {"step": str, "data": dict}
-_pending_reminder = {}  # cid → {step, bot_msg_id}
 _pending_bulk_false = {}  # cid → {"bot_msg_id": ..., "count": ...} — منتظر متن دلیل فالس‌کردن دسته‌جمعی
 _pending_weekly_search = {}  # cid → {"which": str, "msg_id": int}
 # آلارم_آیدی → {chat_id: message_id آخرین پیام False/آپدیت}
@@ -1910,19 +1741,19 @@ _false_broadcast_ids: dict = {}
 MAIN_MENU = [
     ["📈 آلارم جدید"],
     ["⭐ آلارم‌های من", "📊 وضعیت"],
-    ["⚡ آلارم فوری",   "⏰ هشدار دوره‌ای من"],
+    ["⚡ آلارم فوری"],
     ["📡 سیگنال جدید"],
 ]
 MAIN_MENU_PRIVATE = [
     ["📈 آلارم جدید",  "🔒 آلارم شخصی"],
     ["⭐ آلارم‌های من", "📊 وضعیت"],
-    ["⚡ آلارم فوری",   "⏰ هشدار دوره‌ای من"],
+    ["⚡ آلارم فوری"],
     ["📡 سیگنال جدید"],
 ]
 MAIN_MENU_ADMIN = [
     ["📈 آلارم جدید",  "🔒 آلارم شخصی"],
     ["⭐ آلارم‌های من", "📊 وضعیت"],
-    ["⚡ آلارم فوری",   "⏰ هشدار دوره‌ای من"],
+    ["⚡ آلارم فوری"],
     ["📡 سیگنال جدید", "⚙️ پنل ادمین"],
 ]
 # منوی محدود برای اعضای جدید تا وقتی که ادمین تاییدشون نکرده
@@ -2198,37 +2029,6 @@ def _do_update(upd, token):
                                 kb2 = kb2[:-1] + priv_kb  # بستن رو از pub حذف کن، priv_kb خودش داره
                             edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, txt2, kb2)
 
-                    elif cbq_data.startswith("reminder_new:"):
-                        # reminder_new:CID — مستقیم از کاربر نماد بگیر
-                        answer_callback(token_cbq, cbq_id)
-                        _pending_reminder[cbq_cid] = {"step": "rem_symbol", "bot_msg_id": cbq_msg_id}
-                        edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                            "➕ <b>هشدار جدید</b>\n\nنماد رو بنویس (مثلاً BTCUSDT یا XAUUSD):",
-                            [[{"text": "❌ انصراف", "callback_data": "close_myalerts"}]])
-
-                    elif cbq_data.startswith("reminder_sym:"):
-                        # reminder_sym:CID:SYM — انتخاب تایم‌فریم
-                        parts = cbq_data.split(":", 2)
-                        r_cid = parts[1] if len(parts) > 1 else cbq_cid
-                        r_sym = parts[2] if len(parts) > 2 else ""
-                        answer_callback(token_cbq, cbq_id)
-                        if r_sym == "__type__":
-                            # کاربر باید خودش تایپ کنه
-                            _pending_reminder[cbq_cid] = {"step": "rem_symbol", "bot_msg_id": cbq_msg_id}
-                            edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                                "✏️ نماد رو بنویس (مثلاً EURUSD):",
-                                [[{"text": "❌ انصراف", "callback_data": "close_myalerts"}]])
-                        else:
-                            kb_tf = [
-                                [{"text": "🕯 M5  (۱ دق قبل کلوز)",  "callback_data": f"reminder_go:{r_cid}:{r_sym}:300"}],
-                                [{"text": "🕯 M15 (۵ دق قبل کلوز)",  "callback_data": f"reminder_go:{r_cid}:{r_sym}:900"}],
-                                [{"text": "🕯 H1  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{r_cid}:{r_sym}:3600"}],
-                                [{"text": "🕯 H4  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{r_cid}:{r_sym}:14400"}],
-                                [{"text": "✕ برگشت", "callback_data": f"reminder_new:{r_cid}"}],
-                            ]
-                            edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                                f"🕯 تایم‌فریم هشدار برای <b>{r_sym}</b>:", kb_tf)
-
                     elif cbq_data.startswith("ack_trigger:"):
                         # ack_trigger:alarm_id:expected_user_id — فقط مسئول تریگر می‌تونه بزنه
                         parts_ack = cbq_data.split(":", 2)
@@ -2298,9 +2098,7 @@ def _do_update(upd, token):
                                     for tc_ack, tm_ack in msg_map_ack.items():
                                         if tc_ack in ("__tag__", "__text__"):
                                             continue
-                                        new_kb = {"inline_keyboard": [[
-                                            {"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc_ack}:{sym_ack}"}
-                                        ]]}
+                                        new_kb = {"inline_keyboard": []}
                                         try:
                                             r_ed = requests.post(
                                                 f"https://api.telegram.org/bot{tok_ack}/editMessageText",
@@ -2318,85 +2116,6 @@ def _do_update(upd, token):
                                     threading.Thread(target=_sb_save_fired_msgs, args=(aid, msg_map_ack), daemon=True).start()
 
                                 threading.Thread(target=_do_ack, daemon=True).start()
-
-                    elif cbq_data.startswith("set_reminder:"):
-                        # set_reminder:cid:SYM — از دکمه کنار الارم
-                        parts = cbq_data.split(":", 2)
-                        r_cid = parts[1] if len(parts) > 1 else cbq_cid
-                        r_sym = parts[2] if len(parts) > 2 else "؟"
-                        answer_callback(token_cbq, cbq_id)
-                        kb_tf = [
-                            [{"text": "🕯 M5  (۱ دق قبل کلوز)",  "callback_data": f"reminder_go:{r_cid}:{r_sym}:300"}],
-                            [{"text": "🕯 M15 (۵ دق قبل کلوز)",  "callback_data": f"reminder_go:{r_cid}:{r_sym}:900"}],
-                            [{"text": "🕯 H1  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{r_cid}:{r_sym}:3600"}],
-                            [{"text": "🕯 H4  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{r_cid}:{r_sym}:14400"}],
-                            [{"text": "✕ نه ممنون", "callback_data": "close_myalerts"}],
-                        ]
-                        send_tg_keyboard(token_cbq, cbq_cid,
-                            f"🕯 تایم‌فریم هشدار کلوز برای <b>{r_sym}</b>:", kb_tf)
-
-                    elif cbq_data.startswith("reminder_go:"):
-                        parts = cbq_data.split(":")
-                        r_cid = parts[1] if len(parts) > 1 else cbq_cid
-                        r_sym = parts[2] if len(parts) > 2 else "؟"
-                        r_tf  = int(parts[3]) if len(parts) > 3 else 3600
-                        tf_label = _TF_LABEL.get(r_tf, f"{r_tf//60}m")
-                        offset_min = _TF_OFFSET.get(r_tf, 300) // 60
-                        wait_sec, close_teh, progress = _candle_info(r_tf)
-                        wait_min = max(1, wait_sec // 60)
-                        # کنسل reminder قبلی همین نماد
-                        if _reminders.get(r_cid, {}).get(r_sym):
-                            _reminders[r_cid][r_sym]["active"] = False
-                            del _reminders[r_cid][r_sym]
-                            threading.Thread(target=_sb_delete_reminder, args=(r_cid, r_sym), daemon=True).start()
-                        _schedule_reminder(token_cbq, r_cid, r_sym, r_tf, tf_sec=r_tf)
-                        def _bg_confirm(tok=token_cbq, cid_=cbq_cid, cbid=cbq_id,
-                                        sym_=r_sym, tfl=tf_label, wm=wait_min, ct=close_teh,
-                                        pr=progress, om=offset_min):
-                            answer_callback(tok, cbid, f"✅ هشدار کلوز {tfl} فعال شد")
-                            confirm_txt = (
-                                f"✅ هشدار کلوز <b>{tfl}</b> برای <code>{sym_}</code> فعال شد.\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"⏰ کلوز بعدی تهران: <b>{ct}</b>\n"
-                                f"📊 پیشرفت کندل: <b>{pr}%</b>\n"
-                                f"🔔 هشدار اول: <b>{wm} دقیقه</b> دیگه ({om} دق قبل کلوز)\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"برای کنسل: /cancel_reminder"
-                            )
-                            send_tg(tok, cid_, confirm_txt)
-                        threading.Thread(target=_bg_confirm, daemon=True).start()
-
-                    elif cbq_data.startswith("cancel_reminder_one:"):
-                        parts = cbq_data.split(":", 2)
-                        r_cid = parts[1] if len(parts) > 1 else cbq_cid
-                        r_sym = parts[2] if len(parts) > 2 else ""
-                        if r_sym and _reminders.get(r_cid, {}).get(r_sym):
-                            _reminders[r_cid][r_sym]["active"] = False
-                            del _reminders[r_cid][r_sym]
-                            if not _reminders.get(r_cid):
-                                _reminders.pop(r_cid, None)
-                            threading.Thread(target=_sb_delete_reminder, args=(r_cid, r_sym), daemon=True).start()
-                            answer_callback(token_cbq, cbq_id, f"✅ هشدار {r_sym} کنسل شد")
-                        else:
-                            answer_callback(token_cbq, cbq_id, "هشداری پیدا نشد")
-                        # آپدیت لیست
-                        new_text, new_kb = build_cancel_reminder_msg(r_cid)
-                        if new_kb:
-                            edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, new_text, new_kb)
-                        else:
-                            edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, "✅ همه هشدارها کنسل شدن.", [])
-
-                    elif cbq_data.startswith("cancel_reminder_all:"):
-                        r_cid = cbq_data.split(":", 1)[1] if ":" in cbq_data else cbq_cid
-                        if r_cid in _reminders:
-                            for info in _reminders[r_cid].values():
-                                info["active"] = False
-                            del _reminders[r_cid]
-                            threading.Thread(target=_sb_delete_all_reminders, args=(r_cid,), daemon=True).start()
-                            answer_callback(token_cbq, cbq_id, "✅ همه هشدارها کنسل شد")
-                        else:
-                            answer_callback(token_cbq, cbq_id, "هشداری فعال نبود")
-                        edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, "✅ همه هشدارهای دوره‌ای کنسل شدن.", [])
 
                     elif cbq_data.startswith("myalerts:"):
                         # myalerts:pub:CID / myalerts:priv:CID / myalerts:all:CID
@@ -2824,143 +2543,12 @@ def _do_update(upd, token):
                                 [{"text": "✉️ پیام به گروه",     "callback_data": "admin:broadcast"}],
                                 [{"text": "👥 لیست کاربران",      "callback_data": "admin:users"}],
                                 [{"text": "🗑 مدیریت سیگنال‌ها", "callback_data": "admin_sig:list:1"}],
-                                [{"text": "📋 مسئولین آلارم",        "callback_data": "admin:shift:1"}],
+                                # (غیرفعال — تقسیم آلارم کنسل شده) [{"text": "📋 مسئولین آلارم",        "callback_data": "admin:shift:1"}],
                                 [{"text": "❌ فالس همه آلارم‌های فعال", "callback_data": "admin:bulkfalse:0"}],
                                 [{"text": "✕ بستن",               "callback_data": "close_myalerts"}],
                             ]
                             edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
                                 "⚙️ <b>پنل ادمین</b>\n\nیه گزینه انتخاب کن:", admin_kb_b)
-
-                    # ─── مدیریت مسئولین آلارم (جابجایی دستی) ──────────────────
-                    elif cbq_data.startswith("admin:shift"):
-                        if cbq_cid != YOUR_CHAT_ID:
-                            answer_callback(token_cbq, cbq_id, "⛔ فقط ادمین")
-                        else:
-                            parts_sh = cbq_data.split(":")
-                            sh_action = parts_sh[2] if len(parts_sh) > 2 else "1"
-
-                            # ── لیست آلارم‌های فعال (صفحه‌بندی ۵تایی) ──
-                            if sh_action.isdigit():
-                                answer_callback(token_cbq, cbq_id, "⏳ بارگذاری...")
-                                sh_page = int(sh_action)
-                                sh_rows = _sb_load_active_assignments()
-                                PER_PAGE_SH = 5
-                                total_sh = len(sh_rows)
-                                if total_sh == 0:
-                                    edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                                        "📭 <b>هیچ آلارم فعالی نیست.</b>",
-                                        [[{"text": "↩️ پنل ادمین", "callback_data": "admin_sig:back"}]])
-                                else:
-                                    start_sh = (sh_page - 1) * PER_PAGE_SH
-                                    page_rows = sh_rows[start_sh: start_sh + PER_PAGE_SH]
-                                    lines_sh = [f"📋 <b>آلارم‌های فعال</b>  ({total_sh} عدد)\n"]
-                                    kb_sh = []
-                                    for row_sh in page_rows:
-                                        tag_sh   = row_sh.get("alarm_tag", "")
-                                        asn_sh   = row_sh.get("assigned_to") or "—"
-                                        sym_sh   = row_sh.get("symbol", "")
-                                        lines_sh.append(
-                                            f"• {tag_sh}  <code>{sym_sh}</code>\n"
-                                            f"  👤 {asn_sh}"
-                                        )
-                                        aid_sh = row_sh.get("id","")
-                                        kb_sh.append([{"text": f"🔀 {tag_sh} ({asn_sh})",
-                                                        "callback_data": f"admin:shift:assign:{aid_sh}:{sh_page}"}])
-                                    # ناوبری صفحه
-                                    nav_sh = []
-                                    if sh_page > 1:
-                                        nav_sh.append({"text": "◀️ قبل", "callback_data": f"admin:shift:{sh_page-1}"})
-                                    if start_sh + PER_PAGE_SH < total_sh:
-                                        nav_sh.append({"text": "بعد ▶️", "callback_data": f"admin:shift:{sh_page+1}"})
-                                    if nav_sh:
-                                        kb_sh.append(nav_sh)
-                                    kb_sh.append([{"text": "↩️ پنل ادمین", "callback_data": "admin_sig:back"}])
-                                    edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                                        "\n".join(lines_sh), kb_sh)
-
-                            # ── انتخاب آلارم برای reassign — نشون دادن لیست اعضا ──
-                            elif sh_action == "assign" and len(parts_sh) >= 5:
-                                answer_callback(token_cbq, cbq_id)
-                                aid_asgn  = parts_sh[3]
-                                page_asgn = parts_sh[4]
-                                kb_asgn = []
-                                for m in TEAM_MEMBERS:
-                                    kb_asgn.append([{"text": f"👤 {m}",
-                                                      "callback_data": f"admin:shift:do:{aid_asgn}:{m}:{page_asgn}"}])
-                                kb_asgn.append([{"text": "↩️ برگشت به لیست",
-                                                  "callback_data": f"admin:shift:{page_asgn}"}])
-                                edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
-                                    f"👤 <b>انتخاب مسئول جدید</b>\n\n<code>{aid_asgn}</code>\n\nکدوم نفر؟",
-                                    kb_asgn)
-
-                            # ── تایید reassign — ذخیره در Supabase ──
-                            elif sh_action == "do" and len(parts_sh) >= 6:
-                                answer_callback(token_cbq, cbq_id, "✅ در حال جابجایی...")
-                                aid_do    = parts_sh[3]
-                                new_asn   = parts_sh[4]
-                                page_do   = parts_sh[5]
-                                def _do_reassign(aid=aid_do, asn=new_asn, tok=token_cbq,
-                                                  c=cbq_cid, mid=cbq_msg_id, pg=page_do):
-                                    # خوندن اطلاعات آلارم
-                                    try:
-                                        r_get = requests.get(
-                                            f"{SUPABASE_URL}/rest/v1/alarm_assignments?id=eq.{aid}&select=*",
-                                            headers=_sb_h(), timeout=8)
-                                        row_d = r_get.json()[0] if r_get.status_code == 200 and r_get.json() else {}
-                                    except:
-                                        row_d = {}
-                                    old_asn = row_d.get("assigned_to","")
-                                    tag_d   = row_d.get("alarm_tag","")
-                                    already_acked = bool(row_d.get("ack_at"))
-                                    # آپدیت شمارش حافظه
-                                    if old_asn and old_asn in _active_assign_count:
-                                        _active_assign_count[old_asn] = max(0, _active_assign_count[old_asn] - 1)
-                                    _active_assign_count[asn] = _active_assign_count.get(asn, 0) + 1
-                                    # ذخیره در Supabase
-                                    requests.patch(
-                                        f"{SUPABASE_URL}/rest/v1/alarm_assignments?id=eq.{aid}",
-                                        headers={**_sb_h(), "Prefer": "return=minimal"},
-                                        json={"assigned_to": asn},
-                                        timeout=8)
-                                    # ارسال reply به گروه
-                                    tg_tok, cids_d, _ = _get_token_and_cids()
-                                    msg_map_d = _fired_msg_ids.get(aid, {})
-                                    reply_d = (f"🔀 <b>جابجایی دستی</b>\n\n"
-                                               f"{tag_d}\n"
-                                               f"👤 مسئول جدید: <b>{asn}</b>"
-                                               + (f"\n↩️ قبلی: {old_asn}" if old_asn else ""))
-                                    for tc_d, tm_d in msg_map_d.items():
-                                        if tc_d in ("__tag__","__text__"): continue
-                                        try:
-                                            requests.post(
-                                                f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                                                json={"chat_id": tc_d, "text": reply_d,
-                                                      "parse_mode": "HTML",
-                                                      "reply_to_message_id": tm_d},
-                                                timeout=8, headers=H)
-                                        except: pass
-                                    # آپدیت دکمه «دیدم» روی پیام اصلی هر گیرنده —
-                                    # فقط اگه هنوز کسی ack نکرده باشه، منتقلش کن به مسئول جدید
-                                    if not already_acked:
-                                        new_ack_id = TEAM_MEMBER_IDS.get(asn, "")
-                                        sym_d = _extract_symbol_from_tag(tag_d)
-                                        for tc_d, tm_d in msg_map_d.items():
-                                            if tc_d in ("__tag__","__text__"): continue
-                                            kb_d = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc_d}:{sym_d}"}]]
-                                            if new_ack_id and str(tc_d) == str(new_ack_id):
-                                                kb_d.append([{"text": "✅ دیدم", "callback_data": f"ack_trigger:{aid}:{new_ack_id}"}])
-                                            try:
-                                                requests.post(
-                                                    f"https://api.telegram.org/bot{tg_tok}/editMessageReplyMarkup",
-                                                    json={"chat_id": tc_d, "message_id": tm_d,
-                                                          "reply_markup": {"inline_keyboard": kb_d}},
-                                                    timeout=8, headers=H)
-                                            except: pass
-                                    edit_tg_keyboard(tok, c, mid,
-                                        f"✅ <b>جابجایی انجام شد</b>\n\n{tag_d}\n👤 {asn}",
-                                        [[{"text": "📋 برگشت به لیست", "callback_data": f"admin:shift:{pg}"}],
-                                         [{"text": "↩️ پنل ادمین",    "callback_data": "admin_sig:back"}]])
-                                threading.Thread(target=_do_reassign, daemon=True).start()
 
                     # ─── فالس دسته‌جمعی همه‌ی آلارم‌های فعال ──────────────────
                     elif cbq_data.startswith("admin:bulkfalse"):
@@ -3881,8 +3469,7 @@ def _do_update(upd, token):
                             sos_cid_to_mid = {}
                             if s.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sndr):
                                 for tc_sc in tgts:
-                                    kb_sc = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc_sc}:{s}"}]]
-                                    mid_sc = send_tg_keyboard(tok, str(tc_sc), msg, kb_sc, track=False)
+                                    mid_sc = send_tg_keyboard(tok, str(tc_sc), msg, [], track=False)
                                     if mid_sc:
                                         sos_cid_to_mid[str(tc_sc)] = mid_sc
                             if sos_cid_to_mid:
@@ -4386,7 +3973,6 @@ def _do_update(upd, token):
                     all_active2 = [a for a in d2.get("alerts",[]) if a.get("active")]
                     team_active2 = [a for a in all_active2 if not a.get("is_private")]
                     private_active2 = [a for a in all_active2 if a.get("is_private")]
-                    my_rem = _reminders.get(cid, {})
                     is_open = is_forex_market_open()
                     is_adm = (cid == YOUR_CHAT_ID)
                     has_priv = _has_private_access(cid)
@@ -4395,7 +3981,6 @@ def _do_update(upd, token):
                         f"{'🟢' if is_open else '🔴'} فارکس: {'باز' if is_open else 'بسته'}\n"
                         f"📈 آلارم فعال (کل): <b>{len(all_active2)}</b>\n"
                         f"🌐 تیمی: <b>{len(team_active2)}</b> | 🔒 شخصی: <b>{len(private_active2)}</b>\n"
-                        f"⏰ هشدار دوره‌ای من: <b>{len(my_rem)}</b>\n"
                         f"🔒 آلارم شخصی: {'✅ فعال' if has_priv else '❌ غیرفعال'}\n"
                         f"⏱ {now_pretty()} (تهران)"
                     )
@@ -4421,13 +4006,6 @@ def _do_update(upd, token):
                     btns.append([{"text": "✕ بستن", "callback_data": "close_myalerts"}])
                     send_tg_keyboard(token, cid, "⭐ <b>آلارم‌های من</b>\n\nکدوم رو می‌خوای ببینی؟", btns)
 
-                elif txt == "⏰ هشدار دوره‌ای من":
-                    text_msg2, kb2 = build_cancel_reminder_msg(cid)
-                    is_adm = (cid == YOUR_CHAT_ID)
-                    # دکمه ثبت هشدار جدید همیشه نشون داده میشه
-                    kb2.append([{"text": "➕ هشدار جدید", "callback_data": f"reminder_new:{cid}"}])
-                    send_tg_keyboard(token, cid, text_msg2 if kb2 else "هیچ هشدار فعالی نداری.\n\nمیخوای هشدار جدید بذاری؟", kb2)
-
                 elif txt == "📡 سیگنال جدید":
                     # مرحله ۱ — نماد
                     quick_btns = [[{"text": s, "callback_data": f"sig_sym:{cid}:{s}"} for s in SIGNAL_QUICK_SYMBOLS[:3]],
@@ -4444,7 +4022,7 @@ def _do_update(upd, token):
                         [{"text": "✉️ پیام به گروه",      "callback_data": "admin:broadcast"}],
                         [{"text": "👥 لیست کاربران",       "callback_data": "admin:users"}],
                         [{"text": "🗑 مدیریت سیگنال‌ها",  "callback_data": "admin_sig:list:1"}],
-                        [{"text": "📋 مسئولین آلارم",         "callback_data": "admin:shift:1"}],
+                        # (غیرفعال — تقسیم آلارم کنسل شده) [{"text": "📋 مسئولین آلارم",         "callback_data": "admin:shift:1"}],
                         [{"text": "❌ فالس همه آلارم‌های فعال", "callback_data": "admin:bulkfalse:0"}],
                         [{"text": "✕ بستن",                "callback_data": "close_myalerts"}],
                     ]
@@ -4517,26 +4095,6 @@ def _do_update(upd, token):
                             f"✅ <b>{done_count_t} آلارم false شدن</b>\n📝 علت: {reason}",
                             [[{"text": "↩️ پنل ادمین", "callback_data": "admin_sig:back"}]])
                     threading.Thread(target=_do_bulk_false_txt, daemon=True).start()
-
-                elif cid in _pending_reminder and not txt.startswith("/"):
-                    pr_step = _pending_reminder[cid].get("step")
-                    pr_mid  = _pending_reminder[cid].get("bot_msg_id")
-                    if pr_step == "rem_symbol":
-                        r_sym = txt.upper().replace("/","").strip()
-                        if len(r_sym) < 2:
-                            edit_tg_keyboard(token, cid, pr_mid,
-                                "❌ نماد نامعتبر. دوباره بنویس:", [[{"text":"❌ انصراف","callback_data":"close_myalerts"}]])
-                        else:
-                            del _pending_reminder[cid]
-                            kb_tf = [
-                                [{"text": "🕯 M5  (۱ دق قبل کلوز)",  "callback_data": f"reminder_go:{cid}:{r_sym}:300"}],
-                                [{"text": "🕯 M15 (۵ دق قبل کلوز)",  "callback_data": f"reminder_go:{cid}:{r_sym}:900"}],
-                                [{"text": "🕯 H1  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{cid}:{r_sym}:3600"}],
-                                [{"text": "🕯 H4  (۱۵ دق قبل کلوز)", "callback_data": f"reminder_go:{cid}:{r_sym}:14400"}],
-                                [{"text": "✕ انصراف", "callback_data": "close_myalerts"}],
-                            ]
-                            edit_tg_keyboard(token, cid, pr_mid,
-                                f"🕯 تایم‌فریم هشدار برای <b>{r_sym}</b>:", kb_tf)
 
                 elif cid in _pending_alarm and not txt.startswith("/"):
                     step = _pending_alarm[cid]["step"]
@@ -4724,8 +4282,7 @@ def _do_update(upd, token):
                         # broadcast به بقیه
                         if sym_s.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sender_s):
                             for tc2 in targets2:
-                                kb2 = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc2}:{sym_s}"}]]
-                                send_tg_keyboard(token, str(tc2), out_s, kb2, track=False)
+                                send_tg_keyboard(token, str(tc2), out_s, [], track=False)
 
                         # ذخیره توی آرشیو (این مسیر قبلاً اصلاً ذخیره نمی‌شد)
                         sos_arch_entry_s = {"id": str(int(time.time()*1000)), "symbol": sym_s, "type": atype_s,
@@ -4857,9 +4414,7 @@ def _do_update(upd, token):
                         sos_cid_to_mid_txt = {}
                         if sym.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(sender_name):
                             for tc in targets:
-                                mid_sos_txt = send_tg_keyboard(token, tc, out_msg,
-                                    [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc}:{sym}"}]],
-                                    track=False)
+                                mid_sos_txt = send_tg_keyboard(token, tc, out_msg, [], track=False)
                                 if mid_sos_txt:
                                     sos_cid_to_mid_txt[str(tc)] = mid_sos_txt
                         if sos_cid_to_mid_txt:
@@ -4994,13 +4549,6 @@ def _do_update(upd, token):
                                     except: pass
                                 threading.Thread(target=_bg_price_me, daemon=True).start()
                 # ── /news ────────────────────────────────────────────
-                elif txt.startswith("/cancel_reminder"):
-                    text_msg, keyboard = build_cancel_reminder_msg(cid)
-                    if keyboard:
-                        send_tg_keyboard(token, cid, text_msg, keyboard)
-                    else:
-                        send_tg(token, cid, text_msg)
-
                 elif txt.startswith("/myalerts"):
                     btns2 = [[{"text": "🌐 آلارم\u200cهای تیمی", "callback_data": f"myalerts:pub:{cid}"}]]
                     if _has_private_access(cid):
@@ -5272,15 +4820,18 @@ def check_alerts():
                         private_label = "\n\n🔒 <i>آلارم شخصی — فقط برای شما ارسال شده</i>" if a.get("is_private") else ""
                         creator_tag = "#" + re.sub(r'[^\w]', '_', creator).strip('_')
                         # ── تعیین مسئول تریگر — فقط برای آلارم‌های تیمی، آلارم شخصی وارد تقسیم نمی‌شه ──
-                        if a.get("is_private"):
-                            _assignee, _shift = "", None
-                            assignee_line = ""
-                        else:
-                            _assignee, _shift = _get_assignee_for_alarm(
-                                a["id"], alarm_num_tag, now,
-                                symbol=sym, target_price=float(tgt), created_by=creator
-                            )
-                            assignee_line = f"\n\n🎯 مسئول تریگر: <b>{_assignee}</b>" if _assignee else ""
+                        # (غیرفعال — تقسیم آلارم کنسل شده؛ هیچ مسئولی تعیین نمی‌شه و دکمه «دیدم» هم ساخته نمی‌شه)
+                        # if a.get("is_private"):
+                        #     _assignee, _shift = "", None
+                        #     assignee_line = ""
+                        # else:
+                        #     _assignee, _shift = _get_assignee_for_alarm(
+                        #         a["id"], alarm_num_tag, now,
+                        #         symbol=sym, target_price=float(tgt), created_by=creator
+                        #     )
+                        #     assignee_line = f"\n\n🎯 مسئول تریگر: <b>{_assignee}</b>" if _assignee else ""
+                        _assignee, _shift = "", None
+                        assignee_line = ""
                         created_at_raw = a.get("created_at", "")
                         created_label = f" | 📅 ثبت: <i>{created_at_raw[:16]}</i>" if created_at_raw else ""
                         fired_msg = (
@@ -5300,7 +4851,7 @@ def check_alerts():
                         # (هر chat_id همون PV شخصی هر کاربره، پس بقیه اصلاً دکمه رو نمی‌بینن)
                         assignee_ack_id = TEAM_MEMBER_IDS.get(_assignee, "") if _assignee else ""
                         def _fired_kb(cid):
-                            rows_kb = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{cid}:{sym}"}]]
+                            rows_kb = []
                             if assignee_ack_id and str(cid) == str(assignee_ack_id):
                                 rows_kb.append([{"text": "✅ دیدم", "callback_data": f"ack_trigger:{a['id']}:{assignee_ack_id}"}])
                             return rows_kb
@@ -5604,8 +5155,7 @@ def instant_alert():
     sent_count = 0
     if sym.upper() not in TEMP_MUTED_SYMBOLS and not _is_instant_sender_muted(_creator):
         for cid in targets:
-            kb = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{cid}:{sym}"}]]
-            mid = send_tg_keyboard(token, str(cid), out_msg, kb)
+            mid = send_tg_keyboard(token, str(cid), out_msg, [])
             if mid: sent_count += 1
 
     # ذخیره در آرشیو
@@ -5905,74 +5455,6 @@ def admin_panel_assignments():
             "fired_at": row.get("fired_at", ""),
         })
     return jsonify({"ok": True, "items": items, "team_members": TEAM_MEMBERS})
-
-
-@app.route("/api/admin-panel/reassign", methods=["POST"])
-def admin_panel_reassign():
-    """جابجایی دستی مسئول یک آلارم — همون منطق پنل تلگرام"""
-    auth_err = _require_admin_session()
-    if auth_err:
-        return auth_err
-    body = request.json or {}
-    aid = str(body.get("id", ""))
-    new_assignee = body.get("assignee", "")
-    if not aid or new_assignee not in TEAM_MEMBERS:
-        return jsonify({"ok": False, "error": "پارامتر نامعتبر"}), 400
-
-    try:
-        r_get = requests.get(
-            f"{SUPABASE_URL}/rest/v1/alarm_assignments?id=eq.{aid}&select=*",
-            headers=_sb_h(), timeout=8)
-        row = r_get.json()[0] if r_get.status_code == 200 and r_get.json() else {}
-    except Exception:
-        row = {}
-    old_assignee = row.get("assigned_to", "")
-    tag = row.get("alarm_tag", "")
-    already_acked = bool(row.get("ack_at"))
-
-    if old_assignee and old_assignee in _active_assign_count:
-        _active_assign_count[old_assignee] = max(0, _active_assign_count[old_assignee] - 1)
-    _active_assign_count[new_assignee] = _active_assign_count.get(new_assignee, 0) + 1
-
-    requests.patch(
-        f"{SUPABASE_URL}/rest/v1/alarm_assignments?id=eq.{aid}",
-        headers={**_sb_h(), "Prefer": "return=minimal"},
-        json={"assigned_to": new_assignee}, timeout=8)
-
-    # ریپلای به گروه — دقیقاً مثل جابجایی دستی تو تلگرام
-    tg_tok, _, _ = _get_token_and_cids()
-    msg_map = _fired_msg_ids.get(aid, {})
-    reply_text = (f"🔀 <b>جابجایی دستی (از پنل وب)</b>\n\n{tag}\n"
-                  f"👤 مسئول جدید: <b>{new_assignee}</b>"
-                  + (f"\n↩️ قبلی: {old_assignee}" if old_assignee else ""))
-    for tc, tm in msg_map.items():
-        if tc in ("__tag__", "__text__"):
-            continue
-        try:
-            requests.post(f"https://api.telegram.org/bot{tg_tok}/sendMessage",
-                          json={"chat_id": tc, "text": reply_text, "parse_mode": "HTML", "reply_to_message_id": tm},
-                          timeout=8, headers=H)
-        except Exception:
-            pass
-
-    # آپدیت دکمه‌ی «دیدم» — منتقلش کن به مسئول جدید (اگه هنوز کسی ack نکرده)
-    if not already_acked:
-        new_ack_id = TEAM_MEMBER_IDS.get(new_assignee, "")
-        sym_r = _extract_symbol_from_tag(tag)
-        for tc, tm in msg_map.items():
-            if tc in ("__tag__", "__text__"):
-                continue
-            kb = [[{"text": "⏰ هشدار دوره‌ای", "callback_data": f"set_reminder:{tc}:{sym_r}"}]]
-            if new_ack_id and str(tc) == str(new_ack_id):
-                kb.append([{"text": "✅ دیدم", "callback_data": f"ack_trigger:{aid}:{new_ack_id}"}])
-            try:
-                requests.post(f"https://api.telegram.org/bot{tg_tok}/editMessageReplyMarkup",
-                              json={"chat_id": tc, "message_id": tm, "reply_markup": {"inline_keyboard": kb}},
-                              timeout=8, headers=H)
-            except Exception:
-                pass
-
-    return jsonify({"ok": True})
 
 
 @app.route("/api/admin-panel/users", methods=["GET"])
@@ -6308,28 +5790,6 @@ print("=" * 60)
 threading.Thread(target=check_alerts, daemon=True).start()
 print("[STARTUP] thread check_alerts شروع شد")
 
-# ── بازیابی reminder‌ها از Supabase بعد از restart ──
-def _restore_reminders():
-    """همه reminder‌های فعال رو از Supabase بخون و loop‌هاشون رو restart کن"""
-    time.sleep(5)  # صبر تا bot token آماده بشه
-    rows = _sb_load_reminders()
-    if not rows:
-        print("[STARTUP] reminder: هیچ reminder فعالی نیست")
-        return
-    token = BOT_TOKEN_ENV or load_alerts().get("telegram", {}).get("bot_token", "")
-    if not token:
-        print("[STARTUP] reminder: token نیست، restore نشد")
-        return
-    count = 0
-    for row in rows:
-        cid = str(row["chat_id"])
-        sym = row["symbol"]
-        interval_sec = int(row["interval_sec"])
-        tf_sec = int(row.get("tf_sec") or interval_sec)
-        _schedule_reminder(token, cid, sym, interval_sec, persist=False, tf_sec=tf_sec)
-        count += 1
-    print(f"[STARTUP] reminder: {count} هشدار بازیابی شد")
-threading.Thread(target=_restore_reminders, daemon=True).start()
 threading.Thread(target=daily_news_scheduler, daemon=True).start()
 threading.Thread(target=system_broadcast_loop, daemon=True).start()
 print("[STARTUP] thread system_broadcast_loop شروع شد")
