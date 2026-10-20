@@ -772,12 +772,10 @@ TEAM_MEMBER_IDS = {
 TEAM_ID_TO_NAME = {v: k for k, v in TEAM_MEMBER_IDS.items()}
 
 # ── سیستم امتیازدهی آلارم فایرشده (نظرسنجی تیم) ──────────────────
-# کسی که آلارم رو گذاشته رای نمی‌ده → حداکثر ۴ رای‌دهنده از ۵ نفر تیم
-# نتیجه فقط وقتی قطعی می‌شه که از نظر ریاضی غیرقابل‌تغییر باشه یا همه رای بدن
-RATING_RESULT_NOTIFY_USERNAME = "ali_nr2020"  # @ali_nr2020 — نتایج نهایی براش ارسال/منشن می‌شه
-RATING_RESULT_NOTIFY_CID = TEAM_MEMBER_IDS.get("علی", "")  # chat_id علی برای DM
-_pending_rate: dict = {}  # cid → {"alert_id": str, "score": int, "voter_name": str, "creator": str}
-_rating_locks: dict = {}  # alert_id → threading.Lock
+RATING_RESULT_NOTIFY_USERNAME = "ali_nr2020"
+RATING_RESULT_NOTIFY_CID = TEAM_MEMBER_IDS.get("علی", "")
+_pending_rate: dict = {}
+_rating_locks: dict = {}
 _rating_locks_guard = threading.Lock()
 
 def _rating_lock_for(alert_id: str) -> threading.Lock:
@@ -790,7 +788,6 @@ def _norm_name(s: str) -> str:
     return (s or "").strip().lower()
 
 def _eligible_raters(creator_name: str) -> list:
-    """اعضای تیم منهای سازنده آلارم"""
     cn = _norm_name(creator_name)
     return [m for m in TEAM_MEMBERS if _norm_name(m) != cn]
 
@@ -833,10 +830,6 @@ def _sb_save_rating(alert_id: str, voter_cid: str, voter_name: str, score: int,
         print(f"[rating] save exc: {e}")
 
 def _compute_rating_state(votes: list, creator_name: str) -> dict:
-    """
-    votes: list of {voter_name, score, reason, ...}
-    label: pending | setup_a | setup_b | risky
-    """
     eligible = _eligible_raters(creator_name)
     max_voters = max(1, len(eligible))
     elig_set = {_norm_name(m) for m in eligible}
@@ -850,7 +843,6 @@ def _compute_rating_state(votes: list, creator_name: str) -> dict:
     remaining = max(0, max_voters - n)
     max_possible = total + remaining * 5
     min_possible = total + remaining * 1
-
     label = "pending"
     closed = False
     if remaining == 0:
@@ -870,25 +862,17 @@ def _compute_rating_state(votes: list, creator_name: str) -> dict:
     elif min_possible >= 10 and max_possible < 15:
         closed = True
         label = "setup_b"
-
     label_fa = {
         "pending": "⏳ در حال جمع‌آوری رای",
         "setup_a": "🟢 Setup A",
         "setup_b": "🔵 Setup B",
         "risky": "🔴 پرریسک",
     }.get(label, label)
-
     return {
-        "total": total,
-        "voters_count": n,
-        "max_voters": max_voters,
-        "remaining": remaining,
-        "closed": closed,
-        "label": label,
-        "label_fa": label_fa,
-        "votes": clean,
-        "max_possible": max_possible,
-        "min_possible": min_possible,
+        "total": total, "voters_count": n, "max_voters": max_voters,
+        "remaining": remaining, "closed": closed, "label": label,
+        "label_fa": label_fa, "votes": clean,
+        "max_possible": max_possible, "min_possible": min_possible,
     }
 
 def _build_rating_section(state: dict) -> str:
@@ -922,7 +906,6 @@ def _rating_keyboard(alert_id: str, state: dict) -> list:
     ]]
 
 def _refresh_rating_messages(token: str, alert_id: str, creator_name: str):
-    """بعد از هر رای: پیام فایر در همه چت‌ها آپدیت می‌شه"""
     votes = _sb_load_ratings(alert_id)
     state = _compute_rating_state(votes, creator_name)
     msg_map = _fired_msg_ids.get(alert_id, {})
@@ -962,15 +945,12 @@ def _refresh_rating_messages(token: str, alert_id: str, creator_name: str):
     return state
 
 def _notify_rating_result(token: str, alert_id: str, state: dict, creator_name: str):
-    """وقتی رای‌گیری تموم شد: ریپلای روی پیام فایر + اطلاع به @ali_nr2020"""
     tag = (_fired_msg_ids.get(alert_id) or {}).get("__tag__", alert_id)
-    label = state["label_fa"]
-    total = state["total"]
     body_lines = [
         f"✅ <b>نتیجه امتیازدهی</b>",
         f"{tag}",
-        f"{label}",
-        f"مجموع امتیاز: <b>{total}</b> از {state['max_voters'] * 5}",
+        f"{state['label_fa']}",
+        f"مجموع امتیاز: <b>{state['total']}</b> از {state['max_voters'] * 5}",
         "",
     ]
     for v in state["votes"]:
@@ -983,7 +963,6 @@ def _notify_rating_result(token: str, alert_id: str, state: dict, creator_name: 
     body_lines.append(f"👤 سازنده آلارم: {creator_name or '—'}")
     body_lines.append(f"@{RATING_RESULT_NOTIFY_USERNAME}")
     text = "\n".join(body_lines)
-
     msg_map = _fired_msg_ids.get(alert_id, {})
     for tc, tm in list(msg_map.items()):
         if tc in ("__tag__", "__text__", "__text_rated__", "__creator__", "__rating_closed__"):
@@ -996,11 +975,9 @@ def _notify_rating_result(token: str, alert_id: str, state: dict, creator_name: 
                 timeout=8, headers=H)
         except Exception as e:
             print(f"[rating] result reply fail {tc}: {e}")
-
     if RATING_RESULT_NOTIFY_CID:
         try:
-            send_tg(token, RATING_RESULT_NOTIFY_CID,
-                    f"📣 نتیجه امتیاز برای تو:\n\n{text}")
+            send_tg(token, RATING_RESULT_NOTIFY_CID, f"📣 نتیجه امتیاز برای تو:\n\n{text}")
         except Exception as e:
             print(f"[rating] notify ali fail: {e}")
 
@@ -2263,13 +2240,14 @@ def _do_update(upd, token):
                             edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, txt2, kb2)
 
                     elif cbq_data.startswith("rate:"):
-                        # rate:alert_id:score — امتیاز ۱ تا ۵ به آلارم فایرشده
+                        # rate:alert_id:score
                         parts_rt = cbq_data.split(":")
                         rt_aid = parts_rt[1] if len(parts_rt) > 1 else ""
                         try:
                             rt_score = int(parts_rt[2]) if len(parts_rt) > 2 else 0
                         except ValueError:
                             rt_score = 0
+                        print(f"[rating] callback rate aid={rt_aid} score={rt_score} from={cbq.get('from',{})}")
                         if not rt_aid or rt_score not in (1, 2, 3, 4, 5):
                             answer_callback(token_cbq, cbq_id, "امتیاز نامعتبر")
                         else:
@@ -4385,10 +4363,8 @@ def _do_update(upd, token):
                     threading.Thread(target=_do_bulk_false_txt, daemon=True).start()
 
                 elif cid in _pending_rate and not txt.startswith("/"):
-                    # ثبت دلیل امتیاز آلارم فایرشده
                     pr = _pending_rate.pop(cid, None)
                     if pr:
-                        # پاک کردن کلیدهای تکراری (from.id و chat.id)
                         for k in list(_pending_rate.keys()):
                             pv = _pending_rate.get(k)
                             if isinstance(pv, dict) and pv.get("alert_id") == pr.get("alert_id") and pv.get("voter_name") == pr.get("voter_name"):
@@ -5175,7 +5151,6 @@ def check_alerts():
                         )
                         # دکمه هشدار دوره‌ای برای همه — چه شخصی چه عمومی
                         # + دکمه «دیدم» فقط تو PV خودِ مسئول تریگر نمایش داده می‌شه
-                        # (هر chat_id همون PV شخصی هر کاربره، پس بقیه اصلاً دکمه رو نمی‌بینن)
                         # + دکمه‌های امتیاز ۱–۵ فقط برای آلارم تیمی (غیرشخصی)
                         assignee_ack_id = TEAM_MEMBER_IDS.get(_assignee, "") if _assignee else ""
                         _is_team_alert = not a.get("is_private")
@@ -5204,7 +5179,7 @@ def check_alerts():
                         # ذخیره map چت→پیام برای /del و آپدیت امتیاز زنده
                         if fired_cid_to_mid:
                             fired_cid_to_mid["__tag__"] = alarm_num_tag
-                            fired_cid_to_mid["__text__"] = fired_msg  # پایه بدون بخش امتیاز
+                            fired_cid_to_mid["__text__"] = fired_msg
                             fired_cid_to_mid["__creator__"] = creator
                             _fired_msg_ids[a["id"]] = fired_cid_to_mid
                             threading.Thread(target=_sb_save_fired_msgs, args=(a["id"], fired_cid_to_mid), daemon=True).start()
