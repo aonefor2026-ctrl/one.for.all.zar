@@ -759,14 +759,15 @@ def _extract_symbol_from_tag(tag: str) -> str:
 # =====================================================================
 
 # همه اعضای تیم + آیدی عددی تلگرام‌شون (برای تشخیص دکمه‌ی مخصوص «دیدم»)
-TEAM_MEMBERS = ["اتابک", "مهران", "علی", "پیمان", "مسعود"]
+TEAM_MEMBERS = ["اتابک", "مهران", "علی", "پیمان", "مسعود", "زرداری"]
 
 TEAM_MEMBER_IDS = {
-    "مسعود": "109419675",
-    "پیمان": "5089282711",
-    "علی":   "138116289",
-    "اتابک": "349639401",
-    "مهران": "117005892",
+    "مسعود":  "109419675",
+    "پیمان":  "5089282711",
+    "علی":    "138116289",
+    "اتابک":  "349639401",
+    "مهران":  "117005892",
+    "زرداری": "90178485",
 }
 # معکوس: آیدی → اسم (برای چک سریع از from.id در callback)
 TEAM_ID_TO_NAME = {v: k for k, v in TEAM_MEMBER_IDS.items()}
@@ -834,12 +835,18 @@ def _sb_save_rating(alert_id: str, voter_cid: str, voter_name: str, score: int,
 def _compute_rating_state(votes: list, creator_name: str) -> dict:
     eligible = _eligible_raters(creator_name)
     max_voters = max(1, len(eligible))
-    elig_set = {_norm_name(m) for m in eligible}
-    clean = [v for v in votes if _norm_name(v.get("voter_name", "")) in elig_set]
-    by_name = {}
-    for v in clean:
-        by_name[_norm_name(v.get("voter_name", ""))] = v
-    clean = list(by_name.values())
+    # همه رای‌های ذخیره‌شده نشون داده می‌شن (حتی اگه اسم دقیقاً تو TEAM_MEMBERS نبود)
+    # فقط رای سازنده آلارم (اگه اشتباهاً ثبت شده) کنار گذاشته می‌شه
+    cn = _norm_name(creator_name)
+    by_key = {}
+    for v in votes:
+        vn = _norm_name(v.get("voter_name", ""))
+        vc = str(v.get("voter_cid") or "")
+        if cn and vn == cn:
+            continue
+        key = vn or vc or str(id(v))
+        by_key[key] = v
+    clean = list(by_key.values())
     total = sum(int(v.get("score", 0) or 0) for v in clean)
     n = len(clean)
     remaining = max(0, max_voters - n)
@@ -966,17 +973,24 @@ def _refresh_rating_messages(token: str, alert_id: str, creator_name: str, extra
     for tc, tm in targets:
         try:
             mid = int(tm)
+            payload = {"chat_id": str(tc), "message_id": mid, "text": full_text,
+                       "parse_mode": "HTML", "reply_markup": {"inline_keyboard": kb}}
             r = requests.post(
                 f"https://api.telegram.org/bot{token}/editMessageText",
-                json={"chat_id": str(tc), "message_id": mid, "text": full_text,
-                      "parse_mode": "HTML", "reply_markup": {"inline_keyboard": kb}},
-                timeout=10, headers=H)
-            body = (r.text or "")[:150]
+                json=payload, timeout=10, headers=H)
+            body = (r.text or "")[:180]
             print(f"[rating] edit chat={tc} mid={mid} -> {r.status_code} {body}")
-            if r.status_code == 200:
+            if r.status_code == 200 or (r.status_code == 400 and "not modified" in body):
                 edited += 1
-            elif r.status_code == 400 and "message is not modified" in (r.text or ""):
-                edited += 1
+            elif r.status_code == 400:
+                # بدون HTML دوباره تلاش (گاهی parse خطا می‌ده)
+                payload.pop("parse_mode", None)
+                r2 = requests.post(
+                    f"https://api.telegram.org/bot{token}/editMessageText",
+                    json=payload, timeout=10, headers=H)
+                print(f"[rating] edit retry plain chat={tc} -> {r2.status_code} {(r2.text or '')[:120]}")
+                if r2.status_code == 200 or (r2.status_code == 400 and "not modified" in (r2.text or "")):
+                    edited += 1
         except Exception as e:
             print(f"[rating] edit exc {tc}: {e}")
     print(f"[rating] refresh done {alert_id}: edited {edited}/{len(targets)}")
@@ -2237,6 +2251,7 @@ def _do_update(upd, token):
                                 mapped = next((m for m in TEAM_MEMBERS if _norm_name(m) == _norm_name(voter_name_rt)), None)
                                 if mapped:
                                     voter_name_rt = mapped
+                            print(f"[rating] voter resolved name={voter_name_rt!r} id={clicker_id_rt} in_team={voter_name_rt in TEAM_MEMBERS}")
                             # قفل per-alert: ۳ نفر همزمان → یکی‌یکی پردازش می‌شن، بدون گم‌شدن رای
                             with _rating_lock_for(rt_aid):
                                 msg_map_rt = _load_fired_msg_map(rt_aid)
