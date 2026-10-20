@@ -777,6 +777,8 @@ RATING_RESULT_NOTIFY_CID = TEAM_MEMBER_IDS.get("علی", "")
 _pending_rate: dict = {}
 _rating_locks: dict = {}
 _rating_locks_guard = threading.Lock()
+_rating_result_notified: set = set()  # alert_idهایی که نتیجه نهایی‌شون یک‌بار اعلام شده
+_rating_result_notified_lock = threading.Lock()
 
 def _rating_lock_for(alert_id: str) -> threading.Lock:
     with _rating_locks_guard:
@@ -895,44 +897,84 @@ def _rating_keyboard(alert_id: str, state: dict) -> list:
         {"text": "💚 5", "callback_data": f"rate:{aid}:5"},
     ]]
 
-def _refresh_rating_messages(token: str, alert_id: str, creator_name: str):
-    votes = _sb_load_ratings(alert_id)
-    state = _compute_rating_state(votes, creator_name)
-    msg_map = dict(_fired_msg_ids.get(alert_id, {}) or {})
-    if not msg_map.get("__text__") and SUPABASE_KEY:
+def _load_fired_msg_map(alert_id: str) -> dict:
+    """map پیام فایر رو از حافظه + Supabase یکی کن (برای multi-instance حیاتی است)"""
+    msg_map = dict(_fired_msg_ids.get(alert_id) or {})
+    if SUPABASE_KEY:
         try:
             r_fm = requests.get(
                 f"{SUPABASE_URL}/rest/v1/fired_msgs?id=eq.{alert_id}&select=msg_map",
                 headers=_sb_h(), timeout=8)
             if r_fm.status_code == 200 and r_fm.json():
                 raw_fm = r_fm.json()[0].get("msg_map") or "{}"
-                msg_map = json.loads(raw_fm) if isinstance(raw_fm, str) else (raw_fm or {})
+                remote = json.loads(raw_fm) if isinstance(raw_fm, str) else (raw_fm or {})
+                if isinstance(remote, dict):
+                    # chat_id → message_id از DB اولویت داره (کامل‌تره)
+                    for k, v in remote.items():
+                        if str(k).startswith("__"):
+                            if k not in msg_map or not msg_map.get(k):
+                                msg_map[k] = v
+                        else:
+                            msg_map[k] = v
+                    if remote.get("__text__"):
+                        msg_map["__text__"] = remote["__text__"]
+                    if remote.get("__creator__"):
+                        msg_map["__creator__"] = remote["__creator__"]
         except Exception as e:
             print(f"[rating] fired_msgs fetch: {e}")
-    base = msg_map.get("__text__", "")
+    return msg_map
+
+def _refresh_rating_messages(token: str, alert_id: str, creator_name: str, extra_chat_msg=None):
+    """
+    extra_chat_msg: optional (chat_id, message_id) از همان پیامی که روش کلیک شده
+    تا حتی اگه map ناقص بود حداقل پیام کلیک‌کننده آپدیت بشه.
+    """
+    votes = _sb_load_ratings(alert_id)
+    state = _compute_rating_state(votes, creator_name)
+    msg_map = _load_fired_msg_map(alert_id)
+    if extra_chat_msg:
+        ec, em = extra_chat_msg
+        if ec and em:
+            msg_map[str(ec)] = int(em)
+    base = msg_map.get("__text__", "") or msg_map.get("__text_rated__", "")
+    # اگه متن پایه نیست، از بخش امتیاز قبلی جدا کن
     if not base:
-        print(f"[rating] base text missing for {alert_id}")
+        print(f"[rating] base text missing for {alert_id} — keys={list(msg_map.keys())}")
         return state
+    # اگر قبلاً بخش امتیاز چسبیده، فقط پایه رو نگه دار
+    if "────────────" in base:
+        base = base.split("────────────")[0].rstrip()
     full_text = base + _build_rating_section(state)
     kb = _rating_keyboard(alert_id, state)
+    edited = 0
     for tc, tm in list(msg_map.items()):
         if str(tc).startswith("__"):
             continue
         try:
+            mid = int(tm)
             r = requests.post(
                 f"https://api.telegram.org/bot{token}/editMessageText",
-                json={"chat_id": tc, "message_id": int(tm), "text": full_text,
+                json={"chat_id": str(tc), "message_id": mid, "text": full_text,
                       "parse_mode": "HTML", "reply_markup": {"inline_keyboard": kb}},
                 timeout=8, headers=H)
-            print(f"[rating] edit {tc}/{tm} -> {r.status_code}")
+            body = (r.text or "")[:120]
+            print(f"[rating] edit chat={tc} mid={mid} -> {r.status_code} {body}")
+            if r.status_code == 200:
+                edited += 1
         except Exception as e:
             print(f"[rating] edit exc {tc}: {e}")
+    print(f"[rating] refresh {alert_id}: edited {edited}/{len([k for k in msg_map if not str(k).startswith('__')])} chats")
+    msg_map["__text__"] = base
     msg_map["__text_rated__"] = full_text
-    msg_map["__creator__"] = creator_name or ""
+    msg_map["__creator__"] = creator_name or msg_map.get("__creator__", "")
     if state["closed"]:
         msg_map["__rating_closed__"] = "1"
     _fired_msg_ids[alert_id] = msg_map
-    threading.Thread(target=_sb_save_fired_msgs, args=(alert_id, msg_map), daemon=True).start()
+    # همگام ذخیره کن تا instanceهای دیگه ببینن
+    try:
+        _sb_save_fired_msgs(alert_id, msg_map)
+    except Exception as e:
+        print(f"[rating] save map exc: {e}")
     return state
 
 def _notify_rating_result(token: str, alert_id: str, state: dict, creator_name: str):
@@ -2180,42 +2222,51 @@ def _do_update(upd, token):
                                 mapped = next((m for m in TEAM_MEMBERS if _norm_name(m) == _norm_name(voter_name_rt)), None)
                                 if mapped:
                                     voter_name_rt = mapped
-                            msg_map_rt = _fired_msg_ids.get(rt_aid, {}) or {}
-                            creator_rt = msg_map_rt.get("__creator__", "")
-                            if not creator_rt and SUPABASE_KEY:
-                                try:
-                                    r_cr = requests.get(
-                                        f"{SUPABASE_URL}/rest/v1/alerts?id=eq.{rt_aid}&select=created_by",
-                                        headers=_sb_h(), timeout=6)
-                                    if r_cr.status_code == 200 and r_cr.json():
-                                        creator_rt = r_cr.json()[0].get("created_by") or ""
-                                except Exception:
-                                    pass
-                            if voter_name_rt in TEAM_MEMBERS and _norm_name(voter_name_rt) == _norm_name(creator_rt):
-                                answer_callback(token_cbq, cbq_id, "سازنده نمی‌تونه رای بده")
-                            elif msg_map_rt.get("__rating_closed__") == "1":
-                                answer_callback(token_cbq, cbq_id, "رای‌گیری تموم شده")
-                            else:
-                                existing_votes = _sb_load_ratings(rt_aid)
-                                if any(_norm_name(v.get("voter_name","")) == _norm_name(voter_name_rt) or str(v.get("voter_cid")) == clicker_id_rt for v in existing_votes):
-                                    answer_callback(token_cbq, cbq_id, "قبلا رای دادی")
+                            # قفل per-alert: ۳ نفر همزمان → یکی‌یکی پردازش می‌شن، بدون گم‌شدن رای
+                            with _rating_lock_for(rt_aid):
+                                msg_map_rt = _load_fired_msg_map(rt_aid)
+                                creator_rt = msg_map_rt.get("__creator__", "")
+                                if not creator_rt and SUPABASE_KEY:
+                                    try:
+                                        r_cr = requests.get(
+                                            f"{SUPABASE_URL}/rest/v1/alerts?id=eq.{rt_aid}&select=created_by",
+                                            headers=_sb_h(), timeout=6)
+                                        if r_cr.status_code == 200 and r_cr.json():
+                                            creator_rt = r_cr.json()[0].get("created_by") or ""
+                                    except Exception:
+                                        pass
+                                if voter_name_rt in TEAM_MEMBERS and _norm_name(voter_name_rt) == _norm_name(creator_rt):
+                                    answer_callback(token_cbq, cbq_id, "سازنده نمی‌تونه رای بده")
+                                elif msg_map_rt.get("__rating_closed__") == "1":
+                                    answer_callback(token_cbq, cbq_id, "رای‌گیری تموم شده")
                                 else:
-                                    st_chk = _compute_rating_state(existing_votes, creator_rt)
-                                    if st_chk["closed"]:
-                                        answer_callback(token_cbq, cbq_id, "رای‌گیری تموم شده")
+                                    existing_votes = _sb_load_ratings(rt_aid)
+                                    if any(_norm_name(v.get("voter_name","")) == _norm_name(voter_name_rt) or str(v.get("voter_cid")) == clicker_id_rt for v in existing_votes):
+                                        answer_callback(token_cbq, cbq_id, "قبلا رای دادی")
                                     else:
-                                        answer_callback(token_cbq, cbq_id, "امتیاز %s ثبت شد" % rt_score)
-                                        _sb_save_rating(rt_aid, clicker_id_rt, voter_name_rt, rt_score, "", creator_rt)
-                                        state_after = _refresh_rating_messages(token_cbq, rt_aid, creator_rt)
-                                        _pending_rate[clicker_id_rt] = {
-                                            "alert_id": rt_aid, "score": rt_score,
-                                            "voter_name": voter_name_rt, "creator": creator_rt,
-                                            "already_saved": True,
-                                        }
-                                        _pending_rate[cbq_cid] = _pending_rate[clicker_id_rt]
-                                        send_tg(token_cbq, cbq_cid, "✅ امتیاز <b>%s/5</b> ثبت شد. دلیل اختیاری رو بفرست یا نادیده بگیر." % rt_score)
-                                        if state_after and state_after.get("closed"):
-                                            threading.Thread(target=_notify_rating_result, args=(token_cbq, rt_aid, state_after, creator_rt), daemon=True).start()
+                                        st_chk = _compute_rating_state(existing_votes, creator_rt)
+                                        if st_chk["closed"]:
+                                            answer_callback(token_cbq, cbq_id, "رای‌گیری تموم شده")
+                                        else:
+                                            answer_callback(token_cbq, cbq_id, "امتیاز %s ثبت شد" % rt_score)
+                                            _sb_save_rating(rt_aid, clicker_id_rt, voter_name_rt, rt_score, "", creator_rt)
+                                            _extra = (cbq_cid, cbq_msg_id)
+                                            state_after = _refresh_rating_messages(token_cbq, rt_aid, creator_rt, extra_chat_msg=_extra)
+                                            _pending_rate[clicker_id_rt] = {
+                                                "alert_id": rt_aid, "score": rt_score,
+                                                "voter_name": voter_name_rt, "creator": creator_rt,
+                                                "already_saved": True,
+                                            }
+                                            _pending_rate[cbq_cid] = _pending_rate[clicker_id_rt]
+                                            send_tg(token_cbq, cbq_cid, "✅ امتیاز <b>%s/5</b> ثبت شد. دلیل اختیاری رو بفرست یا نادیده بگیر." % rt_score)
+                                            if state_after and state_after.get("closed"):
+                                                should_notify = False
+                                                with _rating_result_notified_lock:
+                                                    if rt_aid not in _rating_result_notified:
+                                                        _rating_result_notified.add(rt_aid)
+                                                        should_notify = True
+                                                if should_notify:
+                                                    threading.Thread(target=_notify_rating_result, args=(token_cbq, rt_aid, state_after, creator_rt), daemon=True).start()
 
                     elif cbq_data.startswith("del_confirm:"):
                         # مرحله اول: نمایش تأیید حذف
@@ -5170,7 +5221,12 @@ def check_alerts():
                             fired_cid_to_mid["__creator__"] = creator
                             _fired_msg_ids[a["id"]] = fired_cid_to_mid
                             print(f"[fire] saved msg map for {a['id']}: chats={list(fired_cid_to_mid.keys())}")
-                            threading.Thread(target=_sb_save_fired_msgs, args=(a["id"], fired_cid_to_mid), daemon=True).start()
+                            # همگام — تا قبل از اولین رای، map تو Supabase باشه (multi-instance)
+                            try:
+                                _sb_save_fired_msgs(a["id"], fired_cid_to_mid)
+                            except Exception as e:
+                                print(f"[fire] fired_msgs save exc: {e}")
+                                threading.Thread(target=_sb_save_fired_msgs, args=(a["id"], fired_cid_to_mid), daemon=True).start()
             if fired:
                 # save_alert_fired() برای هر آلارم Fired شده، وضعیت نهایی را مستقیم
                 # در Supabase ذخیره و cache را هم به‌روز کرده است. بنابراین اینجا
