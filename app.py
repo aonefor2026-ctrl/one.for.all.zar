@@ -924,53 +924,68 @@ def _load_fired_msg_map(alert_id: str) -> dict:
             print(f"[rating] fired_msgs fetch: {e}")
     return msg_map
 
-def _refresh_rating_messages(token: str, alert_id: str, creator_name: str, extra_chat_msg=None):
+def _strip_rating_section(text: str) -> str:
+    """بخش امتیاز رو از متن جدا کن تا پایهٔ پیام فایر بمونه"""
+    if not text:
+        return ""
+    for sep in ("────────────", "⭐ امتیازدهی تیم", "⭐ <b>امتیازدهی تیم</b>"):
+        if sep in text:
+            text = text.split(sep)[0]
+    return text.rstrip()
+
+def _refresh_rating_messages(token: str, alert_id: str, creator_name: str, extra_chat_msg=None, fallback_text=None):
     """
-    extra_chat_msg: optional (chat_id, message_id) از همان پیامی که روش کلیک شده
-    تا حتی اگه map ناقص بود حداقل پیام کلیک‌کننده آپدیت بشه.
+    extra_chat_msg: (chat_id, message_id) پیام کلیک‌شده
+    fallback_text: متن فعلی همان پیام (از callback_query.message) اگه __text__ تو DB نبود
     """
     votes = _sb_load_ratings(alert_id)
     state = _compute_rating_state(votes, creator_name)
+    print(f"[rating] refresh start aid={alert_id} votes={state['voters_count']} total={state['total']}")
     msg_map = _load_fired_msg_map(alert_id)
     if extra_chat_msg:
         ec, em = extra_chat_msg
         if ec and em:
             msg_map[str(ec)] = int(em)
-    base = msg_map.get("__text__", "") or msg_map.get("__text_rated__", "")
-    # اگه متن پایه نیست، از بخش امتیاز قبلی جدا کن
+            print(f"[rating] extra chat={ec} mid={em}")
+    base = msg_map.get("__text__", "") or ""
+    if not base and msg_map.get("__text_rated__"):
+        base = _strip_rating_section(msg_map.get("__text_rated__", ""))
+    if not base and fallback_text:
+        base = _strip_rating_section(fallback_text)
+        print(f"[rating] using fallback_text len={len(base)}")
     if not base:
-        print(f"[rating] base text missing for {alert_id} — keys={list(msg_map.keys())}")
+        print(f"[rating] base text STILL missing aid={alert_id} keys={list(msg_map.keys())}")
+        # حتی بدون پایه، حداقل تلاش کن پیام کلیک‌شده رو با فقط بخش امتیاز ادیت نکن — بی‌فایده‌ست
         return state
-    # اگر قبلاً بخش امتیاز چسبیده، فقط پایه رو نگه دار
-    if "────────────" in base:
-        base = base.split("────────────")[0].rstrip()
+    base = _strip_rating_section(base)
     full_text = base + _build_rating_section(state)
     kb = _rating_keyboard(alert_id, state)
+    targets = [(k, v) for k, v in msg_map.items() if not str(k).startswith("__")]
+    print(f"[rating] will edit {len(targets)} chats: {[t[0] for t in targets]}")
     edited = 0
-    for tc, tm in list(msg_map.items()):
-        if str(tc).startswith("__"):
-            continue
+    for tc, tm in targets:
         try:
             mid = int(tm)
             r = requests.post(
                 f"https://api.telegram.org/bot{token}/editMessageText",
                 json={"chat_id": str(tc), "message_id": mid, "text": full_text,
                       "parse_mode": "HTML", "reply_markup": {"inline_keyboard": kb}},
-                timeout=8, headers=H)
-            body = (r.text or "")[:120]
+                timeout=10, headers=H)
+            body = (r.text or "")[:150]
             print(f"[rating] edit chat={tc} mid={mid} -> {r.status_code} {body}")
             if r.status_code == 200:
                 edited += 1
+            elif r.status_code == 400 and "message is not modified" in (r.text or ""):
+                edited += 1
         except Exception as e:
             print(f"[rating] edit exc {tc}: {e}")
-    print(f"[rating] refresh {alert_id}: edited {edited}/{len([k for k in msg_map if not str(k).startswith('__')])} chats")
+    print(f"[rating] refresh done {alert_id}: edited {edited}/{len(targets)}")
     msg_map["__text__"] = base
     msg_map["__text_rated__"] = full_text
     msg_map["__creator__"] = creator_name or msg_map.get("__creator__", "")
     if state["closed"]:
         msg_map["__rating_closed__"] = "1"
     _fired_msg_ids[alert_id] = msg_map
-    # همگام ذخیره کن تا instanceهای دیگه ببینن
     try:
         _sb_save_fired_msgs(alert_id, msg_map)
     except Exception as e:
@@ -2251,7 +2266,11 @@ def _do_update(upd, token):
                                             answer_callback(token_cbq, cbq_id, "امتیاز %s ثبت شد" % rt_score)
                                             _sb_save_rating(rt_aid, clicker_id_rt, voter_name_rt, rt_score, "", creator_rt)
                                             _extra = (cbq_cid, cbq_msg_id)
-                                            state_after = _refresh_rating_messages(token_cbq, rt_aid, creator_rt, extra_chat_msg=_extra)
+                                            _fb_text = (cbq.get("message") or {}).get("text") or (cbq.get("message") or {}).get("caption") or ""
+                                            print(f"[rating] before refresh map_keys={list((_fired_msg_ids.get(rt_aid) or {}).keys())} fb_len={len(_fb_text)}")
+                                            state_after = _refresh_rating_messages(
+                                                token_cbq, rt_aid, creator_rt,
+                                                extra_chat_msg=_extra, fallback_text=_fb_text)
                                             _pending_rate[clicker_id_rt] = {
                                                 "alert_id": rt_aid, "score": rt_score,
                                                 "voter_name": voter_name_rt, "creator": creator_rt,
